@@ -1,0 +1,121 @@
+split: train
+
+eeg:
+  # Signal acquisition
+  sampling_rate: 200 # Hz
+  duration: 50 # seconds
+  num_channels: 19 # Exclude EKG channel
+
+  # Signal preprocessing (applied before feature extraction)
+  preprocessing:
+    # Band-pass filter
+    bandpass_filter:
+      enabled: true
+      lowcut: 0.5 # Hz - removes low-frequency drift
+      highcut: 50.0 # Hz - removes high-frequency noise
+      order: 4 # Butterworth filter order
+
+    # Notch filter (powerline interference)
+    notch_filter:
+      enabled: true
+      frequency: 60.0 # Hz (60 for US, 50 for EU)
+      quality_factor: 30.0 # Q factor (higher = narrower notch)
+
+    # Z-score normalization
+    normalize:
+      enabled: true
+      method: "zscore" # Per-channel z-score normalization
+
+  # Temporal windowing
+  window_size: 10 # seconds - matches labeled region duration
+  stride: 5 # seconds - 50% overlap
+
+  # Frequency bands for feature extraction
+  bands:
+    delta: [0.5, 4.0]
+    theta: [4.0, 8.0]
+    alpha: [8.0, 13.0]
+    beta: [13.0, 30.0]
+    gamma: [30.0, 50.0]
+
+  # Coherence-based edge construction
+  coherence:
+    threshold: 0.5 # Minimum coherence to create edge
+    nperseg_factor: 2 # nperseg = sampling_rate * nperseg_factor
+    method: "welch" # Method for coherence computation
+
+  # Channel names (exclude EKG)
+  channels:
+    - Fp1
+    - F3
+    - C3
+    - P3
+    - F7
+    - T3
+    - T5
+    - O1
+    - Fz
+    - Cz
+    - Pz
+    - Fp2
+    - F4
+    - C4
+    - P4
+    - F8
+    - T4
+    - T6
+    - O2
+
+spectrogram:
+  duration: 600 # seconds (10 minutes)
+  temporal_resolution: 2 # Hz (one sample every ~2 seconds)
+
+  # Temporal windowing
+  window_size: 10 # seconds
+  stride: 5 # seconds - 50% overlap
+
+  # Regions (4 spatial locations)
+  regions:
+    - LL # Left Lateral
+    - RL # Right Lateral
+    - LP # Left Parasagittal
+    - RP # Right Parasagittal
+
+  # Frequency bands for aggregation
+  bands:
+    delta: [0.5, 4.0]
+    theta: [4.0, 8.0]
+    alpha: [8.0, 13.0]
+    beta: [13.0, 20.0]
+    gamma: [20.0, 30.0]
+
+  # Aggregation method for frequency bins
+  aggregation: "mean" # or 'max'
+
+  # Spatial connectivity (region adjacencies)
+  spatial_edges:
+    - [0, 2] # LL ↔ LP
+    - [2, 0]
+    - [1, 3] # RL ↔ RP
+    - [3, 1]
+    - [0, 1] # LL ↔ RL
+    - [1, 0]
+    - [2, 3] # LP ↔ RP
+    - [3, 2]
+
+# Data paths
+paths:
+  train_csv: "data/raw/train.csv"
+  train_eegs: "data/raw/train_eegs"
+  train_spectrograms: "data/raw/train_spectrograms"
+  processed_dir: "data/processed"
+  cache_file: "data/processed/precomputed_graphs.pt"
+
+# Label mapping
+label_to_index:
+  Seizure: 0
+  LPD: 1
+  GPD: 2
+  LRDA: 3
+  GRDA: 4
+  Other: 5
