@@ -8,9 +8,9 @@ import torch
 from torch import nn
 from torch_geometric.data import Batch
 
-from src.models.temporal_encoder import TemporalGraphEncoder
-from src.models.fusion import CrossModalFusion
-from src.models.classifier import MLPClassifier
+from src.models import TemporalGraphEncoder
+from src.models import CrossModalFusion
+from src.models import MLPClassifier
 
 
 class HMSMultiModalGNN(nn.Module):
