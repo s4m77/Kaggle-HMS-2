@@ -1,1 +1,43 @@
 model_config: configs/model.yaml
+
+# Training hyperparameters (for reference, used in Lightning module)
+
+batch_size: 32
+num_epochs: 100
+learning_rate: 0.001
+weight_decay: 0.0001
+
+# Learning rate scheduler
+scheduler:
+  type: "ReduceLROnPlateau" # Options: "ReduceLROnPlateau", "CosineAnnealing", "StepLR"
+  patience: 5
+  factor: 0.5
+  min_lr: 0.00001
+
+# Early stopping
+early_stopping:
+  patience: 10
+  monitor: "val_loss"
+  mode: "min"
+
+# Class weights for imbalanced dataset
+use_class_weights: true
+
+# Loss function
+loss: "CrossEntropyLoss" # Options: "CrossEntropyLoss", "FocalLoss"
+
+# Data split configuration
+data:
+data_dir: "data/processed"
+train_ratio: 0.8
+val_ratio: 0.1
+test_ratio: 0.1
+shuffle_seed: 42
+num_workers: 4
+pin_memory: true
+
+# Hardware configuration
+hardware:
+device: "cuda" # Options: "cuda", "cpu", "mps"
+mixed_precision: true # Use automatic mixed precision (AMP)
+compile_model: false # Use torch.compile() if available
