@@ -74,7 +74,8 @@ class CrossModalFusion(nn.Module):
         self,
         eeg_features: torch.Tensor,
         spec_features: torch.Tensor,
-    ) -> torch.Tensor:
+        return_attention: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict]:
         """Apply cross-modal attention fusion.
         
         Parameters
@@ -83,11 +84,19 @@ class CrossModalFusion(nn.Module):
             EEG features of shape (batch_size, eeg_dim) or (batch_size, seq_len, eeg_dim)
         spec_features : torch.Tensor
             Spectrogram features of shape (batch_size, spec_dim) or (batch_size, seq_len, spec_dim)
+        return_attention : bool, optional
+            If True, return attention weights for explainability (default: False)
         
         Returns
         -------
-        torch.Tensor
-            Fused features of shape (batch_size, output_dim)
+        torch.Tensor or tuple
+            If return_attention=False: Fused features of shape (batch_size, output_dim)
+            If return_attention=True: Tuple of (fused_features, attention_dict) where
+                attention_dict contains:
+                - 'eeg_to_spec': EEG query → Spec key/value attention weights
+                - 'spec_to_eeg': Spec query → EEG key/value attention weights
+                - 'eeg_proj': Projected EEG features
+                - 'spec_proj': Projected Spectrogram features
         """
         # Ensure inputs are 3D for attention (add seq dimension if needed)
         if eeg_features.dim() == 2:
@@ -100,7 +109,7 @@ class CrossModalFusion(nn.Module):
         spec_proj = self.spec_proj(spec_features)  # (batch, seq_len, hidden_dim)
         
         # EEG attends to Spectrogram
-        eeg_attended, _ = self.eeg_to_spec_attn(
+        eeg_attended, eeg_to_spec_attn_weights = self.eeg_to_spec_attn(
             query=eeg_proj,
             key=spec_proj,
             value=spec_proj,
@@ -109,7 +118,7 @@ class CrossModalFusion(nn.Module):
         eeg_attended = self.dropout(eeg_attended)
         
         # Spectrogram attends to EEG
-        spec_attended, _ = self.spec_to_eeg_attn(
+        spec_attended, spec_to_eeg_attn_weights = self.spec_to_eeg_attn(
             query=spec_proj,
             key=eeg_proj,
             value=eeg_proj,
@@ -123,6 +132,15 @@ class CrossModalFusion(nn.Module):
         
         # Concatenate modalities
         fused = torch.cat([eeg_pooled, spec_pooled], dim=1)  # (batch, 2*hidden_dim)
+        
+        if return_attention:
+            attention_dict = {
+                'eeg_to_spec': eeg_to_spec_attn_weights,  # (batch, num_heads, query_len, key_len)
+                'spec_to_eeg': spec_to_eeg_attn_weights,  # (batch, num_heads, query_len, key_len)
+                'eeg_proj': eeg_proj.detach(),             # (batch, seq_len, hidden_dim)
+                'spec_proj': spec_proj.detach(),           # (batch, seq_len, hidden_dim)
+            }
+            return fused, attention_dict
         
         return fused
 
