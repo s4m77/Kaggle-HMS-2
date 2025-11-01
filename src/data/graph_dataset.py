@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Callable, Any
+import pandas as pd
 import torch
 from torch.utils.data import Dataset
 from torch_geometric.data import Batch
@@ -15,12 +16,19 @@ class HMSDataset(Dataset):
     Loads patient files from data/processed/ where each file contains:
     - patient_id → label_id → {eeg_graphs: List[9], spec_graphs: List[119], target: int}
     
+    This dataset works with a metadata DataFrame (from train_unique.csv) to:
+    - Filter samples based on fold assignments
+    - Access sample metadata (patient_id, label_id, votes, etc.)
+    
     Parameters
     ----------
     data_dir : str or Path
         Directory containing preprocessed patient files (patient_*.pt)
-    patient_ids : List[int]
-        List of patient IDs to include in this dataset
+    metadata_df : pd.DataFrame
+        DataFrame with columns: patient_id, label_id, expert_consensus, *_vote, etc.
+        Must have 'fold' column if using for train/val split
+    is_train : bool
+        Whether this is training set (affects which samples to use based on fold)
     transform : callable, optional
         Optional transform to apply to samples
     """
@@ -28,42 +36,31 @@ class HMSDataset(Dataset):
     def __init__(
         self,
         data_dir: str | Path,
-        patient_ids: List[int],
-        transform: Optional[callable] = None,
+        metadata_df: pd.DataFrame,
+        is_train: bool = True,
+        transform: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
     ) -> None:
         self.data_dir = Path(data_dir)
-        self.patient_ids = patient_ids
+        self.metadata_df = metadata_df.reset_index(drop=True)
+        self.is_train = is_train
         self.transform = transform
         
-        # Build index: list of (patient_id, label_id) tuples
-        self.samples: List[Tuple[int, int]] = []
-        self._build_index()
+        # Build index: list of indices into metadata_df
+        self.sample_indices: List[int] = list(range(len(self.metadata_df)))
         
-    def _build_index(self) -> None:
-        """Build index of all (patient_id, label_id) samples."""
-        for patient_id in self.patient_ids:
-            patient_path = self.data_dir / f"patient_{patient_id}.pt"
-            
-            if not patient_path.exists():
-                print(f"Warning: Patient file not found: {patient_path}")
-                continue
-            
-            # Load patient data
-            try:
-                # Use weights_only=False for PyTorch Geometric Data objects
-                patient_data = torch.load(patient_path, weights_only=False)
-                
-                # Add all label_ids for this patient
-                for label_id in patient_data.keys():
-                    self.samples.append((patient_id, label_id))
-                    
-            except Exception as e:
-                print(f"Error loading patient {patient_id}: {e}")
-                continue
-    
+        # Map labels to indices
+        self.label_map = {
+            'Seizure': 0,
+            'LPD': 1,
+            'GPD': 2,
+            'LRDA': 3,
+            'GRDA': 4,
+            'Other': 5,
+        }
+        
     def __len__(self) -> int:
         """Return total number of samples."""
-        return len(self.samples)
+        return len(self.sample_indices)
     
     def __getitem__(self, idx: int) -> Dict:
         """Get a single sample.
@@ -83,7 +80,12 @@ class HMSDataset(Dataset):
             - 'patient_id': int
             - 'label_id': int
         """
-        patient_id, label_id = self.samples[idx]
+        # Get metadata for this sample
+        sample_idx = self.sample_indices[idx]
+        row = self.metadata_df.iloc[sample_idx]
+        
+        patient_id = int(row['patient_id'])
+        label_id = int(row['label_id'])
         
         # Load patient file (use weights_only=False for PyG Data objects)
         patient_path = self.data_dir / f"patient_{patient_id}.pt"
@@ -116,12 +118,13 @@ class HMSDataset(Dataset):
         """
         class_counts = {}
         
-        for patient_id, label_id in self.samples:
-            patient_path = self.data_dir / f"patient_{patient_id}.pt"
-            patient_data = torch.load(patient_path, weights_only=False)
-            target = patient_data[label_id]['target']
+        for sample_idx in self.sample_indices:
+            row = self.metadata_df.iloc[sample_idx]
+            label = row['expert_consensus'].strip()
+            target = self.label_map.get(label, -1)
             
-            class_counts[target] = class_counts.get(target, 0) + 1
+            if target >= 0:
+                class_counts[target] = class_counts.get(target, 0) + 1
         
         return class_counts
     

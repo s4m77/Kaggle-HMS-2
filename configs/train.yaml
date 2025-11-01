@@ -28,13 +28,24 @@ loss: "CrossEntropyLoss" # Options: "CrossEntropyLoss", "FocalLoss"
 
 # Data split configuration
 data:
-data_dir: "data/processed"
-train_ratio: 0.8
-val_ratio: 0.1
-test_ratio: 0.1
-shuffle_seed: 42
-num_workers: 4
-pin_memory: true
+  data_dir: "data/processed"
+  train_csv: "data/raw/train_unique.csv"
+
+  # K-Fold Cross-Validation
+  n_folds: 5
+  current_fold: 0 # Which fold to use for validation (0-4)
+
+  # Stratification settings
+  stratify_by_evaluators: true
+  evaluator_bins: [0, 5, 10, 15, 20, 999] # Bins for total_evaluators stratification
+
+  # Quality filtering (optional)
+  min_evaluators: 0 # Minimum total_evaluators to include (0 = include all)
+
+  # DataLoader settings
+  num_workers: 4
+  pin_memory: true
+  shuffle_seed: 42
 
 # Hardware configuration
 hardware:

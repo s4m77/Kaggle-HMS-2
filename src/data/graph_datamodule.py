@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional, List
+import pandas as pd
+import numpy as np
 import torch
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader
-import numpy as np
+from sklearn.model_selection import StratifiedGroupKFold
 
 from src.data.graph_dataset import HMSDataset, collate_graphs
 
@@ -15,38 +17,47 @@ from src.data.graph_dataset import HMSDataset, collate_graphs
 class HMSDataModule(LightningDataModule):
     """Lightning DataModule for HMS brain activity classification.
     
-    Handles:
-    - Train/val/test splitting by patient (ensures no patient overlap)
-    - DataLoader creation with custom collate function
-    - Class weight computation for imbalanced data
+    Implements StratifiedGroupKFold cross-validation to:
+    - Split by patient_id (no patient in both train and val)
+    - Stratify by total_evaluators bins (balanced quality distribution)
+    - Support K-fold training for robust evaluation
     
     Parameters
     ----------
     data_dir : str or Path
         Directory containing preprocessed patient files
+    train_csv : str or Path
+        Path to train_unique.csv with metadata
     batch_size : int
         Batch size for training
-    train_ratio : float
-        Proportion of data for training (default: 0.8)
-    val_ratio : float
-        Proportion of data for validation (default: 0.1)
-    test_ratio : float
-        Proportion of data for testing (default: 0.1)
+    n_folds : int
+        Number of folds for cross-validation
+    current_fold : int
+        Which fold to use for validation (0 to n_folds-1)
+    stratify_by_evaluators : bool
+        Whether to stratify by total_evaluators bins
+    evaluator_bins : List[int]
+        Bin edges for total_evaluators stratification (e.g., [0, 5, 10, 15, 20, 999])
+    min_evaluators : int
+        Minimum total_evaluators to include (for quality filtering)
     num_workers : int
         Number of workers for DataLoader
     pin_memory : bool
         Whether to pin memory in DataLoader
     shuffle_seed : int
-        Random seed for patient shuffling
+        Random seed for fold splitting
     """
     
     def __init__(
         self,
         data_dir: str | Path = "data/processed",
+        train_csv: str | Path = "data/raw/train_unique.csv",
         batch_size: int = 32,
-        train_ratio: float = 0.8,
-        val_ratio: float = 0.1,
-        test_ratio: float = 0.1,
+        n_folds: int = 5,
+        current_fold: int = 0,
+        stratify_by_evaluators: bool = True,
+        evaluator_bins: List[int] = [0, 5, 10, 15, 20, 999],
+        min_evaluators: int = 0,
         num_workers: int = 4,
         pin_memory: bool = True,
         shuffle_seed: int = 42,
@@ -54,23 +65,26 @@ class HMSDataModule(LightningDataModule):
         super().__init__()
         
         self.data_dir = Path(data_dir)
+        self.train_csv = Path(train_csv)
         self.batch_size = batch_size
-        self.train_ratio = train_ratio
-        self.val_ratio = val_ratio
-        self.test_ratio = test_ratio
+        self.n_folds = n_folds
+        self.current_fold = current_fold
+        self.stratify_by_evaluators = stratify_by_evaluators
+        self.evaluator_bins = evaluator_bins
+        self.min_evaluators = min_evaluators
         self.num_workers = num_workers
         self.pin_memory = pin_memory
         self.shuffle_seed = shuffle_seed
         
-        # Check ratios sum to 1.0
-        assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, \
-            f"Ratios must sum to 1.0, got {train_ratio + val_ratio + test_ratio}"
+        # Validate inputs
+        assert 0 <= current_fold < n_folds, \
+            f"current_fold must be in [0, {n_folds-1}], got {current_fold}"
         
         # Will be set in setup()
         self.train_dataset: Optional[HMSDataset] = None
         self.val_dataset: Optional[HMSDataset] = None
-        self.test_dataset: Optional[HMSDataset] = None
         self.class_weights: Optional[torch.Tensor] = None
+        self.metadata_df: Optional[pd.DataFrame] = None
         
     def setup(self, stage: Optional[str] = None) -> None:
         """Setup datasets for each stage.
@@ -80,63 +94,120 @@ class HMSDataModule(LightningDataModule):
         stage : str, optional
             Either 'fit', 'validate', 'test', or 'predict'
         """
-        # Get all patient IDs from directory
-        patient_files = sorted(self.data_dir.glob("patient_*.pt"))
-        patient_ids = [
-            int(f.stem.split('_')[1]) for f in patient_files
-        ]
+        # Load metadata CSV
+        self.metadata_df = pd.read_csv(self.train_csv)
         
-        if len(patient_ids) == 0:
-            raise ValueError(f"No patient files found in {self.data_dir}")
+        # Strip whitespace from column names and string columns
+        self.metadata_df.columns = self.metadata_df.columns.str.strip()
+        if 'expert_consensus' in self.metadata_df.columns:
+            self.metadata_df['expert_consensus'] = self.metadata_df['expert_consensus'].str.strip()
         
-        # Shuffle patients with fixed seed for reproducibility
-        rng = np.random.RandomState(self.shuffle_seed)
-        patient_ids = list(patient_ids)
-        rng.shuffle(patient_ids)
+        # Calculate total_evaluators
+        vote_cols = ['seizure_vote', 'lpd_vote', 'gpd_vote', 'lrda_vote', 'grda_vote', 'other_vote']
+        self.metadata_df['total_evaluators'] = self.metadata_df[vote_cols].sum(axis=1)
         
-        # Split by patient to avoid data leakage
-        n_patients = len(patient_ids)
-        n_train = int(n_patients * self.train_ratio)
-        n_val = int(n_patients * self.val_ratio)
+        # Filter to only include patients with processed graph files
+        all_patients = set(self.metadata_df['patient_id'].unique())
+        processed_files = list(self.data_dir.glob("patient_*.pt"))
+        processed_patients = {int(f.stem.split('_')[1]) for f in processed_files}
         
-        train_patients = patient_ids[:n_train]
-        val_patients = patient_ids[n_train:n_train + n_val]
-        test_patients = patient_ids[n_train + n_val:]
+        missing_patients = all_patients - processed_patients
+        if missing_patients:
+            n_before = len(self.metadata_df)
+            self.metadata_df = self.metadata_df[
+                self.metadata_df['patient_id'].isin(processed_patients)
+            ].reset_index(drop=True)
+            n_after = len(self.metadata_df)
+            print(f"⚠ Filtered to only processed patients: {len(all_patients)} → {len(processed_patients)} patients")
+            print(f"  Samples: {n_before} → {n_after}")
+            print(f"  Missing {len(missing_patients)} patients (preprocessing in progress)")
         
-        # Create datasets
+        # Filter by minimum evaluators (quality control)
+        if self.min_evaluators > 0:
+            n_before = len(self.metadata_df)
+            self.metadata_df = self.metadata_df[
+                self.metadata_df['total_evaluators'] >= self.min_evaluators
+            ].reset_index(drop=True)
+            n_after = len(self.metadata_df)
+            print(f"Filtered by min_evaluators={self.min_evaluators}: {n_before} → {n_after} samples")
+        
+        # Create stratification bins
+        if self.stratify_by_evaluators:
+            self.metadata_df['evaluator_bin'] = pd.cut(
+                self.metadata_df['total_evaluators'],
+                bins=self.evaluator_bins,
+                labels=False,
+                include_lowest=True
+            )
+        else:
+            # No stratification, use constant value
+            self.metadata_df['evaluator_bin'] = 0
+        
+        # Group by patient_id
+        patient_groups = self.metadata_df.groupby('patient_id').ngroup()
+        
+        # Perform StratifiedGroupKFold split
+        skf = StratifiedGroupKFold(
+            n_splits=self.n_folds,
+            shuffle=True,
+            random_state=self.shuffle_seed
+        )
+        
+        # Assign fold to each sample
+        self.metadata_df['fold'] = -1
+        for fold, (_, val_idx) in enumerate(skf.split(
+            X=self.metadata_df,
+            y=self.metadata_df['evaluator_bin'],
+            groups=patient_groups
+        )):
+            self.metadata_df.loc[val_idx, 'fold'] = fold
+        
+        # Create train and validation datasets
         if stage == "fit" or stage is None:
+            train_df = self.metadata_df[
+                self.metadata_df['fold'] != self.current_fold
+            ].reset_index(drop=True)
+            
+            val_df = self.metadata_df[
+                self.metadata_df['fold'] == self.current_fold
+            ].reset_index(drop=True)
+            
             self.train_dataset = HMSDataset(
                 data_dir=self.data_dir,
-                patient_ids=train_patients,
+                metadata_df=train_df,
+                is_train=True,
             )
+            
             self.val_dataset = HMSDataset(
                 data_dir=self.data_dir,
-                patient_ids=val_patients,
+                metadata_df=val_df,
+                is_train=False,
             )
             
             # Compute class weights from training set
             self.class_weights = self.train_dataset.get_class_weights()
             
-            print(f"\n{'='*60}")
-            print(f"Dataset Setup:")
-            print(f"  Train: {len(train_patients)} patients, {len(self.train_dataset)} samples")
-            print(f"  Val:   {len(val_patients)} patients, {len(self.val_dataset)} samples")
-            print(f"  Class weights: {self.class_weights.tolist()}")
-            print(f"{'='*60}\n")
-        
-        if stage == "test" or stage is None:
-            self.test_dataset = HMSDataset(
-                data_dir=self.data_dir,
-                patient_ids=test_patients,
-            )
+            # Get unique patients
+            train_patients = train_df['patient_id'].nunique()
+            val_patients = val_df['patient_id'].nunique()
             
             print(f"\n{'='*60}")
-            print(f"Test Dataset Setup:")
-            print(f"  Test:  {len(test_patients)} patients, {len(self.test_dataset)} samples")
+            print(f"Dataset Setup - Fold {self.current_fold}/{self.n_folds-1}:")
+            print(f"  Train: {train_patients} patients, {len(self.train_dataset)} samples")
+            print(f"  Val:   {val_patients} patients, {len(self.val_dataset)} samples")
+            if self.stratify_by_evaluators:
+                print(f"\n  Stratification by evaluator bins:")
+                for fold_df, name in [(train_df, 'Train'), (val_df, 'Val')]:
+                    bin_dist = fold_df['evaluator_bin'].value_counts().sort_index()
+                    print(f"    {name}: {dict(bin_dist)}")
+            print(f"\n  Class weights: {self.class_weights.tolist()}")
             print(f"{'='*60}\n")
     
     def train_dataloader(self) -> DataLoader:
         """Return training DataLoader."""
+        if self.train_dataset is None:
+            raise RuntimeError("Train dataset not initialized. Call setup() first.")
+        
         return DataLoader(
             self.train_dataset,
             batch_size=self.batch_size,
@@ -149,20 +220,11 @@ class HMSDataModule(LightningDataModule):
     
     def val_dataloader(self) -> DataLoader:
         """Return validation DataLoader."""
+        if self.val_dataset is None:
+            raise RuntimeError("Validation dataset not initialized. Call setup() first.")
+        
         return DataLoader(
             self.val_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=self.pin_memory,
-            collate_fn=collate_graphs,
-            persistent_workers=self.num_workers > 0,
-        )
-    
-    def test_dataloader(self) -> DataLoader:
-        """Return test DataLoader."""
-        return DataLoader(
-            self.test_dataset,
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
