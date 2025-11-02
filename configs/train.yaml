@@ -1,60 +1,41 @@
 model_config: configs/model.yaml
-
-# Training hyperparameters (for reference, used in Lightning module)
-
 batch_size: 32
 num_epochs: 100
 learning_rate: 0.001
 weight_decay: 0.0001
-
-# Learning rate scheduler
 scheduler:
-  type: "ReduceLROnPlateau" # Options: "ReduceLROnPlateau", "CosineAnnealing", "StepLR"
+  type: ReduceLROnPlateau
   patience: 5
   factor: 0.5
-  min_lr: 0.00001
-
-# Early stopping
+  min_lr: 1.0e-05
 early_stopping:
   patience: 10
-  monitor: "val_loss"
-  mode: "min"
-
-# Class weights for imbalanced dataset
+  monitor: val_loss
+  mode: min
 use_class_weights: true
-
-# Loss function
-loss: "CrossEntropyLoss" # Options: "CrossEntropyLoss", "FocalLoss"
-
-# Regularization
+loss: CrossEntropyLoss
 regularization:
-  weight_decay: 0.0001 # L2 regularization on weights
-  graph_laplacian_lambda: 0.001 # Graph smoothness regularization (0 = disabled)
-  edge_weight_penalty: 0.0 # Edge attribute L2 penalty (0 = disabled)
-
-# Data split configuration
+  weight_decay: 0.0001
+  graph_laplacian_lambda: 0.001
+  edge_weight_penalty: 0.0
 data:
-  data_dir: "data/processed"
-  train_csv: "data/raw/train_unique.csv"
-
-  # K-Fold Cross-Validation
+  data_dir: data/processed
+  train_csv: data/raw/train_unique.csv
   n_folds: 5
-  current_fold: 0 # Which fold to use for validation (0-4)
-
-  # Stratification settings
+  current_fold: 0
   stratify_by_evaluators: true
-  evaluator_bins: [0, 5, 10, 15, 20, 999] # Bins for total_evaluators stratification
-
-  # Quality filtering (optional)
-  min_evaluators: 0 # Minimum total_evaluators to include (0 = include all)
-
-  # DataLoader settings
+  evaluator_bins:
+  - 0
+  - 5
+  - 10
+  - 15
+  - 20
+  - 999
+  min_evaluators: 0
   num_workers: 4
   pin_memory: true
   shuffle_seed: 42
-
-# Hardware configuration
-hardware:
-device: "cuda" # Options: "cuda", "cpu", "mps"
-mixed_precision: true # Use automatic mixed precision (AMP)
-compile_model: false # Use torch.compile() if available
+hardware: null
+device: cuda
+mixed_precision: true
+compile_model: false

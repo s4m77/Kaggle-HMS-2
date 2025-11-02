@@ -9,7 +9,7 @@ from torch import nn
 from torch_geometric.data import Batch
 from torch_geometric.nn import global_mean_pool, global_max_pool, global_add_pool
 
-from src.models.gat_encoder import GATEncoder
+from src.models import GATEncoder
 
 
 class TemporalGraphEncoder(nn.Module):

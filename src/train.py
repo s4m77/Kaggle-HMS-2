@@ -17,7 +17,8 @@ from src.lightning_trainer import HMSLightningModule
 
 
 def train(
-    config_path: str = "configs/model.yaml",
+    model_config_path: str = "configs/model.yaml",
+    train_config_path: str = "configs/train.yaml",
     wandb_project: str = "hms-brain-activity",
     wandb_name: str | None = None,
     resume_from_checkpoint: str | None = None,
@@ -26,8 +27,10 @@ def train(
     
     Parameters
     ----------
-    config_path : str
+    model_config_path : str
         Path to model configuration file
+    train_config_path : str
+        Path to training configuration file
     wandb_project : str
         WandB project name
     wandb_name : str, optional
@@ -35,43 +38,51 @@ def train(
     resume_from_checkpoint : str, optional
         Path to checkpoint to resume from
     """
-    # Load configuration
-    config = OmegaConf.load(config_path)
+    # Load configurations
+    model_config = OmegaConf.load(model_config_path)
+    train_config = OmegaConf.load(train_config_path)
     
     print("\n" + "="*60)
     print("HMS Multi-Modal GNN Training")
     print("="*60)
-    print(f"Config: {config_path}")
+    print(f"Model Config: {model_config_path}")
+    print(f"Train Config: {train_config_path}")
     print(f"WandB Project: {wandb_project}")
     print(f"WandB Run: {wandb_name or 'auto-generated'}")
+    print(f"Fold: {train_config.data.current_fold}/{train_config.data.n_folds-1}")
     print("="*60 + "\n")
     
-    # Initialize DataModule
+    # Initialize DataModule with K-Fold CV
     print("Initializing DataModule...")
     datamodule = HMSDataModule(
-        data_dir=config.data.get('data_dir', 'data/processed'),
-        batch_size=config.training.batch_size,
-        train_ratio=config.data.train_ratio,
-        val_ratio=config.data.val_ratio,
-        test_ratio=config.data.test_ratio,
-        num_workers=config.data.num_workers,
-        pin_memory=config.data.pin_memory,
-        shuffle_seed=config.data.shuffle_seed,
+        data_dir=train_config.data.data_dir,
+        train_csv=train_config.data.train_csv,
+        batch_size=train_config.batch_size,
+        n_folds=train_config.data.n_folds,
+        current_fold=train_config.data.current_fold,
+        stratify_by_evaluators=train_config.data.stratify_by_evaluators,
+        evaluator_bins=train_config.data.evaluator_bins,
+        min_evaluators=train_config.data.get('min_evaluators', 0),
+        num_workers=train_config.data.num_workers,
+        pin_memory=train_config.data.pin_memory,
+        shuffle_seed=train_config.data.shuffle_seed,
     )
     
     # Setup to get class weights
     datamodule.setup(stage="fit")
-    class_weights = datamodule.get_class_weights() if config.training.use_class_weights else None
+    class_weights = datamodule.get_class_weights() if train_config.use_class_weights else None
     
     # Initialize Lightning Module
     print("Initializing Model...")
     model = HMSLightningModule(
-        model_config=config.model,
-        num_classes=config.model.num_classes,
-        learning_rate=config.training.learning_rate,
-        weight_decay=config.training.weight_decay,
+        model_config=model_config.model,
+        num_classes=model_config.model.num_classes,
+        learning_rate=train_config.learning_rate,
+        weight_decay=train_config.regularization.weight_decay,
         class_weights=class_weights,
-        scheduler_config=config.training.scheduler,
+        scheduler_config=train_config.scheduler,
+        graph_laplacian_lambda=train_config.regularization.graph_laplacian_lambda,
+        edge_weight_penalty=train_config.regularization.edge_weight_penalty,
     )
     
     # Print model info
@@ -93,7 +104,10 @@ def train(
     )
     
     # Log configuration to WandB
-    wandb_logger.experiment.config.update(OmegaConf.to_container(config, resolve=True))
+    wandb_logger.experiment.config.update({
+        "model": OmegaConf.to_container(model_config, resolve=True),
+        "training": OmegaConf.to_container(train_config, resolve=True),
+    })
     
     # Callbacks
     callbacks = []
@@ -111,11 +125,11 @@ def train(
     callbacks.append(checkpoint_callback)
     
     # Early Stopping
-    if config.training.early_stopping.get('patience'):
+    if train_config.early_stopping.get('patience'):
         early_stop_callback = EarlyStopping(
-            monitor=config.training.early_stopping.monitor,
-            patience=config.training.early_stopping.patience,
-            mode=config.training.early_stopping.mode,
+            monitor=train_config.early_stopping.monitor,
+            patience=train_config.early_stopping.patience,
+            mode=train_config.early_stopping.mode,
             verbose=True,
         )
         callbacks.append(early_stop_callback)
@@ -125,13 +139,19 @@ def train(
     callbacks.append(lr_monitor)
     
     # Trainer
+    # Handle both nested (hardware.mixed_precision) and flat (mixed_precision) config structures
+    if hasattr(train_config, 'hardware') and train_config.hardware is not None:
+        mixed_precision = train_config.hardware.mixed_precision
+    else:
+        mixed_precision = getattr(train_config, 'mixed_precision', False)
+    
     trainer = Trainer(
-        max_epochs=config.training.num_epochs,
+        max_epochs=train_config.num_epochs,
         accelerator="auto",  # Auto-detect GPU/CPU/MPS
         devices=1,
         logger=wandb_logger,
         callbacks=callbacks,
-        precision=16 if config.hardware.mixed_precision else 32,
+        precision=16 if mixed_precision else 32,
         gradient_clip_val=1.0,  # Clip gradients to prevent exploding gradients
         log_every_n_steps=10,
         deterministic=False,  # Set to True for reproducibility (slower)
@@ -167,10 +187,16 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="Train HMS Multi-Modal GNN")
     parser.add_argument(
-        "--config",
+        "--model-config",
         type=str,
         default="configs/model.yaml",
-        help="Path to configuration file",
+        help="Path to model configuration file",
+    )
+    parser.add_argument(
+        "--train-config",
+        type=str,
+        default="configs/train.yaml",
+        help="Path to training configuration file",
     )
     parser.add_argument(
         "--wandb-project",
@@ -190,11 +216,25 @@ if __name__ == "__main__":
         default=None,
         help="Path to checkpoint to resume from",
     )
+    parser.add_argument(
+        "--fold",
+        type=int,
+        default=None,
+        help="Override current_fold from config (0-4 for 5-fold CV)",
+    )
     
     args = parser.parse_args()
     
+    # Override fold if specified
+    if args.fold is not None:
+        train_cfg = OmegaConf.load(args.train_config)
+        train_cfg.data.current_fold = args.fold
+        OmegaConf.save(train_cfg, args.train_config)
+        print(f"Updated current_fold to {args.fold} in {args.train_config}")
+    
     train(
-        config_path=args.config,
+        model_config_path=args.model_config,
+        train_config_path=args.train_config,
         wandb_project=args.wandb_project,
         wandb_name=args.wandb_name,
         resume_from_checkpoint=args.resume,
