@@ -165,6 +165,7 @@ class HMSLightningModule(LightningModule):
             self.log(f'{stage}/reg_loss', reg_loss, on_step=True, on_epoch=True, prog_bar=False)
             self.log(f'{stage}/loss', total_loss, on_step=True, on_epoch=True, prog_bar=True)
             loss = total_loss
+            if loss == torch.nan: print('Warning: NaN found in loss for batch: ', batch_idx)
         else:
             # No regularization for val/test
             self.log(f'{stage}/loss', ce_loss, on_step=True, on_epoch=True, prog_bar=True)

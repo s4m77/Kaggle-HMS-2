@@ -100,6 +100,9 @@ class TemporalGraphEncoder(nn.Module):
         # Layer normalization for stability
         self.layer_norm = nn.LayerNorm(gat_out_dim)
         
+        # Center-focused attention: learns to weight the labeled center window higher
+        self.center_attention = nn.Linear(rnn_hidden_dim * 2 if bidirectional else rnn_hidden_dim, 1)
+        
         # Output dimension
         self.output_dim = rnn_hidden_dim * 2 if bidirectional else rnn_hidden_dim
     
@@ -110,18 +113,21 @@ class TemporalGraphEncoder(nn.Module):
     ) -> torch.Tensor:
         """Process a list of temporal graphs and return encoded representation.
         
+        Uses center-focused attention to weight the labeled center window more heavily
+        than peripheral windows, since experts only labeled the center 10-second window.
+        
         Parameters
         ----------
         graphs : List[Batch]
             List of batched graphs, one per time window. Each batch contains
-            multiple samples from the same window.
+            multiple samples from the same window. Each graph should have 'is_center' attribute.
         return_sequence : bool
-            If True, return full sequence output. If False, return only final hidden state.
+            If True, return full sequence output. If False, return attention-weighted representation.
         
         Returns
         -------
         torch.Tensor
-            If return_sequence=False: Final LSTM hidden state of shape (batch_size, output_dim)
+            If return_sequence=False: Attention-weighted output of shape (batch_size, output_dim)
             If return_sequence=True: Full sequence of shape (batch_size, seq_len, output_dim)
         """
         if not graphs:
@@ -129,6 +135,10 @@ class TemporalGraphEncoder(nn.Module):
         
         # Get batch size from first graph
         batch_size = graphs[0].num_graphs
+        
+        # Extract is_center flags for attention weighting
+        # is_center_mask: (seq_len,) - True for center window, False for others
+        is_center_mask = torch.stack([graph.is_center[0] for graph in graphs])  # (seq_len,)
         
         # Process each temporal window through GAT
         window_embeddings: List[torch.Tensor] = []
@@ -149,19 +159,29 @@ class TemporalGraphEncoder(nn.Module):
         # Apply LSTM
         lstm_out, (h_n, c_n) = self.lstm(sequence)
         # lstm_out: (batch_size, seq_len, hidden_dim * num_directions)
-        # h_n: (num_layers * num_directions, batch_size, hidden_dim)
         
         if return_sequence:
             return lstm_out  # (batch_size, seq_len, output_dim)
         else:
-            # Extract final hidden state
-            if self.bidirectional:
-                # Concatenate forward and backward from last layer
-                final_hidden = torch.cat([h_n[-2], h_n[-1]], dim=1)  # (batch_size, 2*hidden_dim)
-            else:
-                final_hidden = h_n[-1]  # (batch_size, hidden_dim)
+            # Apply center-focused attention
+            # Compute attention scores for each timestep
+            attention_scores = self.center_attention(lstm_out)  # (batch_size, seq_len, 1)
+            attention_scores = attention_scores.squeeze(-1)  # (batch_size, seq_len)
             
-            return final_hidden  # (batch_size, output_dim)
+            # Boost attention for center window (where is_center=True)
+            # Add a large bias to the center window's attention score
+            center_boost = is_center_mask.float() * 2.0  # Boost center by +2.0
+            center_boost = center_boost.unsqueeze(0).expand(batch_size, -1)  # (batch_size, seq_len)
+            attention_scores = attention_scores + center_boost
+            
+            # Apply softmax to get attention weights
+            attention_weights = torch.softmax(attention_scores, dim=1)  # (batch_size, seq_len)
+            
+            # Weighted sum of LSTM outputs
+            attention_weights = attention_weights.unsqueeze(-1)  # (batch_size, seq_len, 1)
+            attended_output = (lstm_out * attention_weights).sum(dim=1)  # (batch_size, output_dim)
+            
+            return attended_output  # (batch_size, output_dim)
     
     def _pool_nodes(self, node_embeddings: torch.Tensor, graph: Batch) -> torch.Tensor:
         """Pool node embeddings to graph-level embeddings using PyG pooling.
