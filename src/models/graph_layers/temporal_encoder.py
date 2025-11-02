@@ -153,6 +153,11 @@ class TemporalGraphEncoder(nn.Module):
         # Stack windows into sequence: (batch_size, seq_len, gat_out_dim)
         sequence = torch.stack(window_embeddings, dim=1)
         
+        # Check for NaN/Inf in sequence (safety check)
+        if torch.isnan(sequence).any() or torch.isinf(sequence).any():
+            # Replace NaN/Inf with zeros to prevent training collapse
+            sequence = torch.nan_to_num(sequence, nan=0.0, posinf=0.0, neginf=0.0)
+        
         # Apply layer normalization
         sequence = self.layer_norm(sequence)
         

@@ -17,7 +17,6 @@ from src.lightning_trainer import HMSLightningModule
 
 
 def train(
-    model_config_path: str = "configs/model.yaml",
     train_config_path: str = "configs/train.yaml",
     wandb_project: str = "hms-brain-activity",
     wandb_name: str | None = None,
@@ -39,13 +38,13 @@ def train(
         Path to checkpoint to resume from
     """
     # Load configurations
-    model_config = OmegaConf.load(model_config_path)
     train_config = OmegaConf.load(train_config_path)
+    model_config = OmegaConf.load(train_config.model_config)
     
     print("\n" + "="*60)
     print("HMS Multi-Modal GNN Training")
     print("="*60)
-    print(f"Model Config: {model_config_path}")
+    print(f"Model Config: {train_config.model_config}")
     print(f"Train Config: {train_config_path}")
     print(f"WandB Project: {wandb_project}")
     print(f"WandB Run: {wandb_name or 'auto-generated'}")
@@ -142,12 +141,24 @@ def train(
     # Handle both nested (hardware.mixed_precision) and flat (mixed_precision) config structures
     if hasattr(train_config, 'hardware') and train_config.hardware is not None:
         mixed_precision = train_config.hardware.mixed_precision
+        device = getattr(train_config.hardware, 'device', 'auto')
     else:
         mixed_precision = getattr(train_config, 'mixed_precision', False)
+        device = getattr(train_config, 'device', 'auto')
+    
+    # Map device names to PyTorch Lightning accelerator names
+    if device == 'cuda':
+        accelerator = 'gpu'
+    elif device == 'mps':
+        accelerator = 'mps'
+    elif device == 'cpu':
+        accelerator = 'cpu'
+    else:
+        accelerator = 'auto'
     
     trainer = Trainer(
         max_epochs=train_config.num_epochs,
-        accelerator="auto",  # Auto-detect GPU/CPU/MPS
+        accelerator=accelerator,  # Use configured device
         devices=1,
         logger=wandb_logger,
         callbacks=callbacks,
@@ -186,12 +197,6 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Train HMS Multi-Modal GNN")
-    parser.add_argument(
-        "--model-config",
-        type=str,
-        default="configs/model.yaml",
-        help="Path to model configuration file",
-    )
     parser.add_argument(
         "--train-config",
         type=str,
@@ -233,7 +238,6 @@ if __name__ == "__main__":
         print(f"Updated current_fold to {args.fold} in {args.train_config}")
     
     train(
-        model_config_path=args.model_config,
         train_config_path=args.train_config,
         wandb_project=args.wandb_project,
         wandb_name=args.wandb_name,

@@ -94,10 +94,26 @@ class HMSDataset(Dataset):
         # Get specific label data
         sample_data = patient_data[label_id]
         
+        # Clean NaN/Inf from graphs (safety check for corrupted preprocessing)
+        eeg_graphs = sample_data['eeg_graphs']
+        spec_graphs = sample_data['spec_graphs']
+        
+        # Replace NaN/Inf in EEG graph features
+        for graph in eeg_graphs:
+            if hasattr(graph, 'x') and graph.x is not None:
+                graph.x = torch.nan_to_num(graph.x, nan=0.0, posinf=0.0, neginf=0.0)
+            if hasattr(graph, 'edge_attr') and graph.edge_attr is not None:
+                graph.edge_attr = torch.nan_to_num(graph.edge_attr, nan=0.0, posinf=1.0, neginf=0.0)
+        
+        # Replace NaN/Inf in Spec graph features
+        for graph in spec_graphs:
+            if hasattr(graph, 'x') and graph.x is not None:
+                graph.x = torch.nan_to_num(graph.x, nan=0.0, posinf=0.0, neginf=0.0)
+        
         # Construct sample
         sample = {
-            'eeg_graphs': sample_data['eeg_graphs'],
-            'spec_graphs': sample_data['spec_graphs'],
+            'eeg_graphs': eeg_graphs,
+            'spec_graphs': spec_graphs,
             'target': sample_data['target'],
             'patient_id': patient_id,
             'label_id': label_id,

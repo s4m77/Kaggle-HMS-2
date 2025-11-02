@@ -114,7 +114,7 @@ class HMSLightningModule(LightningModule):
         """Forward pass through the model."""
         return self.model(eeg_graphs, spec_graphs)
     
-    def _shared_step(self, batch: Dict, batch_idx: int, stage: str):
+    def _step(self, batch: Dict, batch_idx: int, stage: str):
         """Shared step for train/val/test.
         
         Parameters
@@ -140,6 +140,16 @@ class HMSLightningModule(LightningModule):
         # Compute classification loss
         ce_loss = self.criterion(logits, targets)
         
+        # Safety check for NaN in CE loss
+        if torch.isnan(ce_loss):
+            print(f"WARNING: NaN in CE loss at batch {batch_idx}")
+            print(f"  Logits stats: min={logits.min():.4f}, max={logits.max():.4f}, mean={logits.mean():.4f}")
+            print(f"  Targets: {targets}")
+            print(f"  Has NaN in logits: {torch.isnan(logits).any()}")
+            print(f"  Has Inf in logits: {torch.isinf(logits).any()}")
+            # Skip this batch to prevent NaN propagation
+            return None
+        
         # Add graph regularization (only during training)
         if stage == 'train' and intermediate is not None:
             # EEG graph regularization
@@ -158,6 +168,14 @@ class HMSLightningModule(LightningModule):
             
             # Total regularization
             reg_loss = eeg_reg + spec_reg
+            
+            # Safety check for NaN in regularization
+            if torch.isnan(reg_loss):
+                print(f"WARNING: NaN in regularization loss at batch {batch_idx}")
+                print(f"  EEG reg: {eeg_reg}, Spec reg: {spec_reg}")
+                # Use CE loss only if regularization is NaN
+                reg_loss = torch.tensor(0.0, device=ce_loss.device)
+            
             total_loss = ce_loss + reg_loss
             
             # Log individual components (step-level for progress bar, epoch-level for WandB)
@@ -165,7 +183,6 @@ class HMSLightningModule(LightningModule):
             self.log(f'{stage}/reg_loss', reg_loss, on_step=True, on_epoch=True, prog_bar=False)
             self.log(f'{stage}/loss', total_loss, on_step=True, on_epoch=True, prog_bar=True)
             loss = total_loss
-            if loss == torch.nan: print('Warning: NaN found in loss for batch: ', batch_idx)
         else:
             # No regularization for val/test
             self.log(f'{stage}/loss', ce_loss, on_step=True, on_epoch=True, prog_bar=True)
@@ -192,15 +209,15 @@ class HMSLightningModule(LightningModule):
     
     def training_step(self, batch: Dict, batch_idx: int):
         """Training step."""
-        return self._shared_step(batch, batch_idx, 'train')
+        return self._step(batch, batch_idx, 'train')
     
     def validation_step(self, batch: Dict, batch_idx: int):
         """Validation step."""
-        return self._shared_step(batch, batch_idx, 'val')
+        return self._step(batch, batch_idx, 'val')
     
     def test_step(self, batch: Dict, batch_idx: int):
         """Test step."""
-        return self._shared_step(batch, batch_idx, 'test')
+        return self._step(batch, batch_idx, 'test')
     
     def on_train_epoch_end(self):
         """Called at the end of training epoch."""
