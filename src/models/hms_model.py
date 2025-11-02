@@ -117,7 +117,8 @@ class HMSMultiModalGNN(nn.Module):
         self,
         eeg_graphs: List[Batch],
         spec_graphs: List[Batch],
-    ) -> torch.Tensor:
+        return_intermediate: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict]:
         """Forward pass through the multi-modal model.
         
         Parameters
@@ -126,11 +127,17 @@ class HMSMultiModalGNN(nn.Module):
             List of 9 batched EEG graphs (one per temporal window)
         spec_graphs : List[Batch]
             List of 119 batched spectrogram graphs (one per temporal window)
+        return_intermediate : bool
+            If True, return intermediate features for regularization
         
         Returns
         -------
-        torch.Tensor
-            Logits of shape (batch_size, num_classes)
+        torch.Tensor or tuple
+            If return_intermediate=False: Logits of shape (batch_size, num_classes)
+            If return_intermediate=True: (logits, intermediate_dict) where
+                intermediate_dict contains:
+                - 'eeg_graphs': Input EEG graphs (for Laplacian regularization)
+                - 'spec_graphs': Input Spec graphs (for Laplacian regularization)
         """
         # Encode EEG sequence
         eeg_features = self.eeg_encoder(eeg_graphs, return_sequence=False)
@@ -147,6 +154,14 @@ class HMSMultiModalGNN(nn.Module):
         # Classify
         logits = self.classifier(fused_features)
         # logits: (batch_size, num_classes)
+        
+        if return_intermediate:
+            # Return graphs for regularization computation
+            intermediate = {
+                'eeg_graphs': eeg_graphs,
+                'spec_graphs': spec_graphs,
+            }
+            return logits, intermediate
         
         return logits
     

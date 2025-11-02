@@ -381,58 +381,69 @@ def process_all_data(config, n_workers=None):
     # Create progress bar based on total samples
     pbar = tqdm(total=samples_to_process, desc="Processing samples", unit="sample")
     
-    for patient_id in sorted(all_patients):
-        # Skip if this patient is already processed
-        if patient_id in existing_patients:
+    # Create Pool ONCE outside the loop (reuse for all patients)
+    pool = None
+    if n_workers > 1:
+        pool = Pool(processes=n_workers)
+    
+    try:
+        for patient_id in sorted(all_patients):
+            # Skip if this patient is already processed
+            if patient_id in existing_patients:
+                patient_samples = grouped_by_patient.get_group(patient_id)
+                skipped_count += len(patient_samples)
+                continue
+            
+            # Get all samples for this patient
             patient_samples = grouped_by_patient.get_group(patient_id)
-            skipped_count += len(patient_samples)
-            continue
-        
-        # Get all samples for this patient
-        patient_samples = grouped_by_patient.get_group(patient_id)
-        num_patient_samples = len(patient_samples)
-        
-        # Prepare arguments for multiprocessing
-        args_list = [
-            (row.to_dict(), config_dict) 
-            for _, row in patient_samples.iterrows()
-        ]
-        
-        # Process samples for this patient in parallel
-        if n_workers > 1:
-            with Pool(processes=n_workers) as pool:
+            num_patient_samples = len(patient_samples)
+            
+            # Prepare arguments for multiprocessing
+            args_list = [
+                (row.to_dict(), config_dict) 
+                for _, row in patient_samples.iterrows()
+            ]
+            
+            # Process samples for this patient in parallel
+            if pool is not None:
                 results = pool.map(process_single_label_wrapper, args_list)
-        else:
-            # Single-threaded for debugging
-            results = [process_single_label_wrapper(args) for args in args_list]
-        
-        # Collect results into patient data
-        patient_data = {}
-        for result in results:
-            if result is not None:
-                label_id = result['label_id']
-                patient_data[label_id] = {
-                    'eeg_graphs': result['eeg_graphs'],
-                    'spec_graphs': result['spec_graphs'],
-                    'target': result['target']
-                }
-                success_count += 1
             else:
-                failed_count += 1
-        
-        # Update progress bar
-        pbar.update(num_patient_samples)
-        
-        # Save patient file
-        if patient_data:
-            output_path = output_dir / f"patient_{patient_id}.pt"
-            torch.save(patient_data, output_path)
-            saved_patients_count += 1
+                # Single-threaded for debugging
+                results = [process_single_label_wrapper(args) for args in args_list]
+            
+            # Collect results into patient data
+            patient_data = {}
+            for result in results:
+                if result is not None:
+                    label_id = result['label_id']
+                    patient_data[label_id] = {
+                        'eeg_graphs': result['eeg_graphs'],
+                        'spec_graphs': result['spec_graphs'],
+                        'target': result['target']
+                    }
+                    success_count += 1
+                else:
+                    failed_count += 1
+            
+            # Update progress bar
+            pbar.update(num_patient_samples)
+            
+            # Save patient file
+            if patient_data:
+                output_path = output_dir / f"patient_{patient_id}.pt"
+                torch.save(patient_data, output_path)
+                saved_patients_count += 1
             
             # Update metadata every 100 patients (instead of every patient)
             if saved_patients_count % 100 == 0:
                 update_metadata(output_dir, config)
                 pbar.write(f"  [Checkpoint] Saved {saved_patients_count} patients, updated metadata")
+    
+    finally:
+        # Clean up: close the pool properly
+        if pool is not None:
+            pool.close()
+            pool.join()
     
     # Close progress bar
     pbar.close()

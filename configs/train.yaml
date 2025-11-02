@@ -26,6 +26,12 @@ use_class_weights: true
 # Loss function
 loss: "CrossEntropyLoss" # Options: "CrossEntropyLoss", "FocalLoss"
 
+# Regularization
+regularization:
+  weight_decay: 0.0001 # L2 regularization on weights
+  graph_laplacian_lambda: 0.001 # Graph smoothness regularization (0 = disabled)
+  edge_weight_penalty: 0.0 # Edge attribute L2 penalty (0 = disabled)
+
 # Data split configuration
 data:
   data_dir: "data/processed"

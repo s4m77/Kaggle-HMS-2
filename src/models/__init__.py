@@ -5,6 +5,11 @@ from src.models.graph_layers.temporal_encoder import TemporalGraphEncoder
 from src.models.graph_layers.fusion import CrossModalFusion
 from src.models.graph_layers.classifier import MLPClassifier
 from src.models.hms_model import HMSMultiModalGNN
+from src.models.regularization import (
+    graph_laplacian_regularization,
+    edge_weight_regularization,
+    compute_graph_regularization,
+)
 
 __all__ = [
     "GATEncoder",
@@ -12,4 +17,7 @@ __all__ = [
     "CrossModalFusion",
     "MLPClassifier",
     "HMSMultiModalGNN",
+    "graph_laplacian_regularization",
+    "edge_weight_regularization",
+    "compute_graph_regularization",
 ]
