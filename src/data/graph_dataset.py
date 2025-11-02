@@ -191,17 +191,24 @@ def collate_graphs(batch: List[Dict]) -> Dict:
         batched_graph = Batch.from_data_list(graphs_at_t)
         batched_eeg_graphs.append(batched_graph)
     
-    # Batch Spectrogram graphs: same process
+    # Batch Spectrogram graphs: drop the 5th feature (gamma band - always 0)
     num_spec_timesteps = len(spec_sequences[0])
     batched_spec_graphs = []
     for t in range(num_spec_timesteps):
         graphs_at_t = [spec_sequences[b][t] for b in range(batch_size)]
+        
+        # Drop the 5th feature (index 4) from each graph's node features
+        for graph in graphs_at_t:
+            if graph.x.size(1) == 5:  # If has 5 features, drop the last one
+                graph.x = graph.x[:, :4]  # Keep only first 4 features (delta, theta, alpha, beta)
+        
+        # Batch them into single PyG Batch object
         batched_graph = Batch.from_data_list(graphs_at_t)
         batched_spec_graphs.append(batched_graph)
     
     return {
         'eeg_graphs': batched_eeg_graphs,  # List[9] of Batch objects
-        'spec_graphs': batched_spec_graphs,  # List[119] of Batch objects
+        'spec_graphs': batched_spec_graphs,  # List[119] of Batch objects (with 4 features each)
         'targets': targets,  # (batch_size,)
         'patient_ids': patient_ids,
         'label_ids': label_ids,

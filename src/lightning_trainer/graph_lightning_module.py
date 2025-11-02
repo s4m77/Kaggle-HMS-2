@@ -160,14 +160,14 @@ class HMSLightningModule(LightningModule):
             reg_loss = eeg_reg + spec_reg
             total_loss = ce_loss + reg_loss
             
-            # Log individual components
-            self.log(f'{stage}/ce_loss', ce_loss, on_step=False, on_epoch=True)
-            self.log(f'{stage}/reg_loss', reg_loss, on_step=False, on_epoch=True)
-            self.log(f'{stage}/loss', total_loss, on_step=False, on_epoch=True, prog_bar=True)
+            # Log individual components (step-level for progress bar, epoch-level for WandB)
+            self.log(f'{stage}/ce_loss', ce_loss, on_step=True, on_epoch=True, prog_bar=False)
+            self.log(f'{stage}/reg_loss', reg_loss, on_step=True, on_epoch=True, prog_bar=False)
+            self.log(f'{stage}/loss', total_loss, on_step=True, on_epoch=True, prog_bar=True)
             loss = total_loss
         else:
             # No regularization for val/test
-            self.log(f'{stage}/loss', ce_loss, on_step=False, on_epoch=True, prog_bar=True)
+            self.log(f'{stage}/loss', ce_loss, on_step=True, on_epoch=True, prog_bar=True)
             loss = ce_loss
         
         # Get predictions
