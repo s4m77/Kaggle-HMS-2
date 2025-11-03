@@ -1,0 +1,25 @@
+# EEG-Only GNN Model Configuration for HMS Brain Activity Classification
+
+model_type: "eeg_only"
+
+model:
+  num_classes: 6
+
+  eeg_encoder:
+    in_channels: 5
+    gat_hidden_dim: 64
+    gat_out_dim: 64
+    gat_num_layers: 2
+    gat_heads: 4
+    gat_dropout: 0.3
+    use_edge_attr: true
+    rnn_hidden_dim: 128
+    rnn_num_layers: 2
+    rnn_dropout: 0.2
+    bidirectional: true
+    pooling_method: "mean"
+
+  classifier:
+    hidden_dims: [256, 128]
+    dropout: 0.3
+    activation: "elu"
