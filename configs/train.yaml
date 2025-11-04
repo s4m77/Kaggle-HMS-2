@@ -1,8 +1,10 @@
 model_config: configs/model.yaml
 batch_size: 32
 num_epochs: 100
-learning_rate: 0.001
+learning_rate: 0.0003
 weight_decay: 0.0001
+wandb_project: hms-brain-activity-KL
+wandb_name: ''
 scheduler:
   type: ReduceLROnPlateau
   patience: 5
@@ -10,10 +12,10 @@ scheduler:
   min_lr: 1.0e-05
 early_stopping:
   patience: 10
-  monitor: val_loss
+  monitor: val/loss_epoch
   mode: min
-use_class_weights: true
-loss: CrossEntropyLoss
+use_class_weights: false
+loss: KLDivLoss
 regularization:
   weight_decay: 0.0001
   graph_laplacian_lambda: 0.0
@@ -23,6 +25,7 @@ data:
   train_csv: data/raw/train_unique.csv
   n_folds: 5
   current_fold: 0
+  stratify_by_class: false
   stratify_by_evaluators: true
   evaluator_bins:
   - 0

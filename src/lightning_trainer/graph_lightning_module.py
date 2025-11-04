@@ -8,7 +8,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from pytorch_lightning import LightningModule
 from torchmetrics import Accuracy, MetricCollection
-from torchmetrics.classification import MulticlassF1Score, MulticlassPrecision, MulticlassRecall
 
 from src.models import HMSMultiModalGNN
 from src.models.regularization import compute_graph_regularization
@@ -19,9 +18,14 @@ class HMSLightningModule(LightningModule):
     
     Handles:
     - Training, validation, and test steps
-    - Loss computation with optional class weights
+    - Loss computation with optional class weights (CrossEntropy) or KL divergence
     - Graph Laplacian regularization
-    - Metrics: accuracy, F1, precision, recall (macro & per-class)
+    - Metrics for vote prediction:
+        * KL Divergence (loss) - Primary Kaggle metric
+        * Accuracy - Consensus class correctness
+        * MSE - Vote distribution error
+        * Total Variation Distance - Interpretable vote error
+        * Per-Class MSE - Class-specific error analysis
     - WandB logging
     - Learning rate scheduling
     - Optimizer configuration
@@ -56,6 +60,7 @@ class HMSLightningModule(LightningModule):
         scheduler_config: Optional[Dict[str, Any]] = None,
         graph_laplacian_lambda: float = 0.001,
         edge_weight_penalty: float = 0.0,
+        loss_type: str = "CrossEntropyLoss",
     ) -> None:
         super().__init__()
         
@@ -77,9 +82,14 @@ class HMSLightningModule(LightningModule):
         self.scheduler_config = scheduler_config or {}
         self.graph_laplacian_lambda = graph_laplacian_lambda
         self.edge_weight_penalty = edge_weight_penalty
+        self.loss_type = loss_type
         
         # Loss function
-        if class_weights is not None:
+        if loss_type == "KLDivLoss":
+            # KL divergence expects log probabilities as input
+            self.criterion = nn.KLDivLoss(reduction='batchmean')
+            self.class_weights = None
+        elif class_weights is not None:
             self.register_buffer('class_weights', class_weights)
             self.criterion = nn.CrossEntropyLoss(weight=class_weights)
         else:
@@ -87,28 +97,14 @@ class HMSLightningModule(LightningModule):
             self.criterion = nn.CrossEntropyLoss()
         
         # Metrics for each stage
+        # Note: For vote prediction, accuracy measures if argmax(pred) == argmax(true_votes)
         metrics = MetricCollection({
             'acc': Accuracy(task='multiclass', num_classes=num_classes, average='micro'),
-            'acc_macro': Accuracy(task='multiclass', num_classes=num_classes, average='macro'),
-            'f1_macro': MulticlassF1Score(num_classes=num_classes, average='macro'),
-            'precision_macro': MulticlassPrecision(num_classes=num_classes, average='macro'),
-            'recall_macro': MulticlassRecall(num_classes=num_classes, average='macro'),
         })
         
         self.train_metrics = metrics.clone(prefix='train/')
         self.val_metrics = metrics.clone(prefix='val/')
         self.test_metrics = metrics.clone(prefix='test/')
-        
-        # Per-class accuracy (for detailed analysis)
-        self.train_acc_per_class = Accuracy(
-            task='multiclass', num_classes=num_classes, average='none'
-        )
-        self.val_acc_per_class = Accuracy(
-            task='multiclass', num_classes=num_classes, average='none'
-        )
-        self.test_acc_per_class = Accuracy(
-            task='multiclass', num_classes=num_classes, average='none'
-        )
     
     def forward(self, eeg_graphs, spec_graphs):
         """Forward pass through the model."""
@@ -130,6 +126,9 @@ class HMSLightningModule(LightningModule):
         spec_graphs = batch['spec_graphs']
         targets = batch['targets']
         
+        # Get batch size for proper metric logging
+        batch_size = targets.size(0)
+        
         # Forward pass (with intermediate outputs for regularization during training)
         if stage == 'train' and (self.graph_laplacian_lambda > 0 or self.edge_weight_penalty > 0):
             logits, intermediate = self.model(eeg_graphs, spec_graphs, return_intermediate=True)
@@ -138,11 +137,29 @@ class HMSLightningModule(LightningModule):
             intermediate = None
         
         # Compute classification loss
-        ce_loss = self.criterion(logits, targets)
+        if self.loss_type == "KLDivLoss":
+            # For KL divergence:
+            # - logits are raw model outputs
+            # - targets should be probability distributions (sum to 1)
+            # - criterion expects log probabilities as input and target probabilities
+            log_probs = F.log_softmax(logits, dim=-1)
+            
+            # Ensure targets are probabilities (normalize if they're vote counts)
+            if targets.dim() == 1:
+                # If targets are class indices, convert to one-hot (hard targets)
+                target_probs = F.one_hot(targets, num_classes=self.num_classes).float()
+            else:
+                # If targets are already distributions (vote counts), normalize
+                target_probs = targets / targets.sum(dim=-1, keepdim=True)
+            
+            ce_loss = self.criterion(log_probs, target_probs)
+        else:
+            # CrossEntropyLoss expects logits and class indices
+            ce_loss = self.criterion(logits, targets)
         
-        # Safety check for NaN in CE loss
+        # Safety check for NaN in loss
         if torch.isnan(ce_loss):
-            print(f"WARNING: NaN in CE loss at batch {batch_idx}")
+            print(f"WARNING: NaN in loss at batch {batch_idx}")
             print(f"  Logits stats: min={logits.min():.4f}, max={logits.max():.4f}, mean={logits.mean():.4f}")
             print(f"  Targets: {targets}")
             print(f"  Has NaN in logits: {torch.isnan(logits).any()}")
@@ -178,32 +195,58 @@ class HMSLightningModule(LightningModule):
             
             total_loss = ce_loss + reg_loss
             
-            # Log individual components (step-level for progress bar, epoch-level for WandB)
-            self.log(f'{stage}/ce_loss', ce_loss, on_step=True, on_epoch=True, prog_bar=False)
-            self.log(f'{stage}/reg_loss', reg_loss, on_step=True, on_epoch=True, prog_bar=False)
-            self.log(f'{stage}/loss', total_loss, on_step=True, on_epoch=True, prog_bar=True)
+            # Log individual components
+            # Note: on_step=True creates {metric}_step, on_epoch=True creates {metric}_epoch
+            # Step metrics logged every log_every_n_steps (default: 10)
+            # Epoch metrics logged at end of epoch (aggregated mean)
+            self.log(f'{stage}/ce_loss', ce_loss, on_step=True, on_epoch=True, prog_bar=False, batch_size=batch_size)
+            self.log(f'{stage}/reg_loss', reg_loss, on_step=True, on_epoch=True, prog_bar=False, batch_size=batch_size)
+            self.log(f'{stage}/loss', total_loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=batch_size)
             loss = total_loss
         else:
             # No regularization for val/test
-            self.log(f'{stage}/loss', ce_loss, on_step=True, on_epoch=True, prog_bar=True)
+            self.log(f'{stage}/loss', ce_loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=batch_size)
             loss = ce_loss
         
         # Get predictions
         preds = torch.argmax(logits, dim=1)
         
-        # Update metrics
-        if stage == 'train':
-            metrics = self.train_metrics(preds, targets)
-            self.train_acc_per_class(preds, targets)
-        elif stage == 'val':
-            metrics = self.val_metrics(preds, targets)
-            self.val_acc_per_class(preds, targets)
-        else:  # test
-            metrics = self.test_metrics(preds, targets)
-            self.test_acc_per_class(preds, targets)
+        # For KL divergence with vote distributions, get ground truth class for metrics
+        if self.loss_type == "KLDivLoss" and targets.dim() > 1:
+            # targets are probability distributions, get the argmax for metrics
+            target_classes = torch.argmax(targets, dim=1)
+        else:
+            # targets are already class indices
+            target_classes = targets
         
-        # Log metrics
-        self.log_dict(metrics, on_step=False, on_epoch=True, prog_bar=True)
+        # Update classification metrics (accuracy, F1, etc.)
+        if stage == 'train':
+            metrics = self.train_metrics(preds, target_classes)
+        elif stage == 'val':
+            metrics = self.val_metrics(preds, target_classes)
+        else:  # test
+            metrics = self.test_metrics(preds, target_classes)
+        
+        # Log classification metrics
+        self.log_dict(metrics, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
+        
+        # Additional metrics for vote prediction (KL Divergence)
+        if self.loss_type == "KLDivLoss" and targets.dim() > 1:
+            # Compute predicted probabilities
+            pred_probs = F.softmax(logits, dim=-1)
+            
+            # MSE between predicted and true vote distributions
+            mse = F.mse_loss(pred_probs, target_probs, reduction='mean')
+            self.log(f'{stage}/mse', mse, on_step=False, on_epoch=True, prog_bar=False, batch_size=batch_size)
+            
+            # Total Variation Distance: 0.5 * sum(|p - q|)
+            tv_distance = 0.5 * torch.abs(pred_probs - target_probs).sum(dim=-1).mean()
+            self.log(f'{stage}/tv_distance', tv_distance, on_step=False, on_epoch=True, prog_bar=False, batch_size=batch_size)
+            
+            # Per-class MSE (useful for seeing which classes are harder to predict)
+            per_class_mse = ((pred_probs - target_probs) ** 2).mean(dim=0)
+            for i, class_mse in enumerate(per_class_mse):
+                self.log(f'{stage}/mse_class_{i}', class_mse, on_step=False, on_epoch=True, prog_bar=False, batch_size=batch_size)
         
         return loss
     
@@ -218,30 +261,6 @@ class HMSLightningModule(LightningModule):
     def test_step(self, batch: Dict, batch_idx: int):
         """Test step."""
         return self._step(batch, batch_idx, 'test')
-    
-    def on_train_epoch_end(self):
-        """Called at the end of training epoch."""
-        # Compute and log per-class accuracy
-        per_class_acc = self.train_acc_per_class.compute()
-        for i, acc in enumerate(per_class_acc):
-            self.log(f'train/acc_class_{i}', acc, prog_bar=False)
-        self.train_acc_per_class.reset()
-    
-    def on_validation_epoch_end(self):
-        """Called at the end of validation epoch."""
-        # Compute and log per-class accuracy
-        per_class_acc = self.val_acc_per_class.compute()
-        for i, acc in enumerate(per_class_acc):
-            self.log(f'val/acc_class_{i}', acc, prog_bar=False)
-        self.val_acc_per_class.reset()
-    
-    def on_test_epoch_end(self):
-        """Called at the end of test epoch."""
-        # Compute and log per-class accuracy
-        per_class_acc = self.test_acc_per_class.compute()
-        for i, acc in enumerate(per_class_acc):
-            self.log(f'test/acc_class_{i}', acc, prog_bar=False)
-        self.test_acc_per_class.reset()
     
     def configure_optimizers(self):
         """Configure optimizer and learning rate scheduler."""
