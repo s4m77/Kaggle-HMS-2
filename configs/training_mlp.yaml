@@ -13,9 +13,9 @@ data:
     - other_vote
 
   loader:
-    batch_size: 2048
+    batch_size: 48
     shuffle: true
-    num_workers: 8
+    num_workers: 0
     pin_memory: true
 
   splits:
@@ -65,16 +65,16 @@ optimizer:
 
 scheduler:
   name: cosine_with_warmup
-  warmup_epochs: 5
+  warmup_epochs: 10
   min_lr: 1.0e-5
 
 trainer:
   max_epochs: 30
-  accelerator: gpu
+  accelerator: mps
   devices: 1
   precision: bf16-mixed
   gradient_clip_val: 1.0
-  log_every_n_steps: 50
+  log_every_n_steps: 5
   benchmark: true
 
 logging:
