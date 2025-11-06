@@ -175,7 +175,7 @@ class TemporalGraphEncoder(nn.Module):
             
             # Boost attention for center window (where is_center=True)
             # Add a large bias to the center window's attention score
-            center_boost = is_center_mask.float() * 2.0  # Boost center by +2.0
+            center_boost = is_center_mask.float() * .3
             center_boost = center_boost.unsqueeze(0).expand(batch_size, -1)  # (batch_size, seq_len)
             attention_scores = attention_scores + center_boost
             

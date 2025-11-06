@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Callable, Any
-import pandas as pd
+from typing import Dict, List, Optional, Callable, Any
+
 import torch
+import pandas as pd
+import numpy as np
 from torch.utils.data import Dataset
 from torch_geometric.data import Batch
 
@@ -212,6 +214,10 @@ def collate_graphs(batch: List[Dict]) -> Dict:
     batched_spec_graphs = []
     for t in range(num_spec_timesteps):
         graphs_at_t = [spec_sequences[b][t] for b in range(batch_size)]
+
+        if len(graphs_at_t) > 40:  # If more than 40 spec windows
+            indices = np.linspace(0, len(graphs_at_t)-1, 40, dtype=int)
+            graphs_at_t = [graphs_at_t[i] for i in indices]
         
         # Drop the 5th feature (index 4) from each graph's node features
         for graph in graphs_at_t:

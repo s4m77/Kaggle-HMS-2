@@ -34,8 +34,10 @@ class HMSDataModule(LightningDataModule):
         Number of folds for cross-validation
     current_fold : int
         Which fold to use for validation (0 to n_folds-1)
+    stratify_by_class : bool
+        Whether to stratify by consensus class (recommended for vote prediction)
     stratify_by_evaluators : bool
-        Whether to stratify by total_evaluators bins
+        Whether to also stratify by evaluator quality bins (dual stratification)
     evaluator_bins : List[int]
         Bin edges for total_evaluators stratification (e.g., [0, 5, 10, 15, 20, 999])
     min_evaluators : int
@@ -55,7 +57,8 @@ class HMSDataModule(LightningDataModule):
         batch_size: int = 32,
         n_folds: int = 5,
         current_fold: int = 0,
-        stratify_by_evaluators: bool = True,
+        stratify_by_class: bool = True,
+        stratify_by_evaluators: bool = False,
         evaluator_bins: List[int] = [0, 5, 10, 15, 20, 999],
         min_evaluators: int = 0,
         num_workers: int = 4,
@@ -69,6 +72,7 @@ class HMSDataModule(LightningDataModule):
         self.batch_size = batch_size
         self.n_folds = n_folds
         self.current_fold = current_fold
+        self.stratify_by_class = stratify_by_class
         self.stratify_by_evaluators = stratify_by_evaluators
         self.evaluator_bins = evaluator_bins
         self.min_evaluators = min_evaluators
@@ -131,17 +135,40 @@ class HMSDataModule(LightningDataModule):
             n_after = len(self.metadata_df)
             print(f"Filtered by min_evaluators={self.min_evaluators}: {n_before} → {n_after} samples")
         
-        # Create stratification bins
-        if self.stratify_by_evaluators:
+        # Determine stratification variable
+        if self.stratify_by_class and self.stratify_by_evaluators:
+            # Dual stratification: combine class + evaluator bin into single stratification key
+            # Create evaluator bins
             self.metadata_df['evaluator_bin'] = pd.cut(
                 self.metadata_df['total_evaluators'],
                 bins=self.evaluator_bins,
                 labels=False,
                 include_lowest=True
             )
+            # Combine class and evaluator bin (e.g., "class_0_bin_2")
+            stratify_var = (
+                self.metadata_df['expert_consensus'].astype(str) + '_' + 
+                self.metadata_df['evaluator_bin'].astype(str)
+            )
+            print(f"Stratifying by consensus class AND evaluator bins")
+        elif self.stratify_by_class:
+            # Stratify by consensus class only
+            stratify_var = self.metadata_df['expert_consensus']
+            print(f"Stratifying by consensus class only")
+        elif self.stratify_by_evaluators:
+            # Stratify by evaluator bins only
+            self.metadata_df['evaluator_bin'] = pd.cut(
+                self.metadata_df['total_evaluators'],
+                bins=self.evaluator_bins,
+                labels=False,
+                include_lowest=True
+            )
+            stratify_var = self.metadata_df['evaluator_bin']
+            print(f"Stratifying by evaluator bins only")
         else:
             # No stratification, use constant value
-            self.metadata_df['evaluator_bin'] = 0
+            stratify_var = pd.Series([0] * len(self.metadata_df))
+            print(f"No stratification (patient-based GroupKFold only)")
         
         # Group by patient_id
         patient_groups = self.metadata_df.groupby('patient_id').ngroup()
@@ -157,7 +184,7 @@ class HMSDataModule(LightningDataModule):
         self.metadata_df['fold'] = -1
         for fold, (_, val_idx) in enumerate(skf.split(
             X=self.metadata_df,
-            y=self.metadata_df['evaluator_bin'],
+            y=stratify_var,
             groups=patient_groups
         )):
             self.metadata_df.loc[val_idx, 'fold'] = fold
@@ -195,11 +222,21 @@ class HMSDataModule(LightningDataModule):
             print(f"Dataset Setup - Fold {self.current_fold}/{self.n_folds-1}:")
             print(f"  Train: {train_patients} patients, {len(self.train_dataset)} samples")
             print(f"  Val:   {val_patients} patients, {len(self.val_dataset)} samples")
+            
+            # Show class distribution
+            if self.stratify_by_class:
+                print(f"\n  Stratification by consensus class:")
+                for fold_df, name in [(train_df, 'Train'), (val_df, 'Val')]:
+                    class_dist = fold_df['expert_consensus'].value_counts().sort_index()
+                    print(f"    {name}: {dict(class_dist)}")
+            
+            # Show evaluator bin distribution
             if self.stratify_by_evaluators:
                 print(f"\n  Stratification by evaluator bins:")
                 for fold_df, name in [(train_df, 'Train'), (val_df, 'Val')]:
                     bin_dist = fold_df['evaluator_bin'].value_counts().sort_index()
                     print(f"    {name}: {dict(bin_dist)}")
+            
             print(f"\n  Class weights: {self.class_weights.tolist()}")
             print(f"{'='*60}\n")
     

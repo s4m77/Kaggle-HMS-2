@@ -89,8 +89,9 @@ def train(
         batch_size=train_config.batch_size,
         n_folds=train_config.data.n_folds,
         current_fold=train_config.data.current_fold,
-        stratify_by_evaluators=train_config.data.stratify_by_evaluators,
-        evaluator_bins=train_config.data.evaluator_bins,
+        stratify_by_class=train_config.data.get('stratify_by_class', True),
+        stratify_by_evaluators=train_config.data.get('stratify_by_evaluators', False),
+        evaluator_bins=train_config.data.get('evaluator_bins', [0, 5, 10, 15, 20, 999]),
         min_evaluators=train_config.data.get('min_evaluators', 0),
         num_workers=train_config.data.num_workers,
         pin_memory=train_config.data.pin_memory,
@@ -112,6 +113,7 @@ def train(
         scheduler_config=train_config.scheduler,
         graph_laplacian_lambda=train_config.regularization.graph_laplacian_lambda,
         edge_weight_penalty=train_config.regularization.edge_weight_penalty,
+        loss_type=train_config.loss,
     )
     
     # Print model info
@@ -134,6 +136,12 @@ def train(
         log_model=True,  # Log model checkpoints to WandB
     )
     
+    # Configure WandB to log step-level metrics
+    # Note: Metrics logged with on_step=True will appear as {metric}_step in WandB
+    # Metrics logged with on_epoch=True will appear as {metric}_epoch in WandB
+    wandb_logger.experiment.define_metric("train/loss_step", step_metric="trainer/global_step")
+    wandb_logger.experiment.define_metric("train/loss_epoch", step_metric="epoch")
+    
     # Log configuration to WandB
     wandb_logger.experiment.config.update({
         "model": OmegaConf.to_container(model_config, resolve=True),
@@ -144,6 +152,7 @@ def train(
     callbacks = []
     
     # Model Checkpoint - save best model based on validation loss
+    # Note: val/loss becomes val/loss_epoch when on_epoch=True
     checkpoint_callback = ModelCheckpoint(
         dirpath="checkpoints",
         filename=f"{checkpoint_prefix}" + "-{epoch:02d}-{val/loss:.4f}",
@@ -179,14 +188,23 @@ def train(
         device = getattr(train_config, 'device', 'auto')
     
     # Map device names to PyTorch Lightning accelerator names
-    if device == 'cuda':
-        accelerator = 'gpu'
-    elif device == 'mps':
-        accelerator = 'mps'
-    elif device == 'cpu':
-        accelerator = 'cpu'
+    # if device == 'cuda':
+    #     accelerator = 'gpu'
+    # elif device == 'mps':
+    #     accelerator = 'mps'
+    # elif device == 'cpu':
+    #     accelerator = 'cpu'
+    # else:
+    #     accelerator = 'auto'
+    accelerator = 'auto'
+    
+    # Configure precision based on device
+    # MPS doesn't support the same mixed precision as CUDA
+    if mixed_precision and device == 'cuda':
+        precision = 16
     else:
-        accelerator = 'auto'
+        # Use 32-bit precision for MPS and CPU (MPS has native optimizations)
+        precision = 32
     
     trainer = Trainer(
         max_epochs=train_config.num_epochs,
@@ -194,9 +212,10 @@ def train(
         devices=1,
         logger=wandb_logger,
         callbacks=callbacks,
-        precision=16 if mixed_precision else 32,
+        precision=precision,
         gradient_clip_val=1.0,  # Clip gradients to prevent exploding gradients
         log_every_n_steps=10,
+        val_check_interval=0.25,  # Run validation twice per epoch (every 50% of training data)
         deterministic=False,  # Set to True for reproducibility (slower)
     )
     
@@ -244,7 +263,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--wandb-project",
         type=str,
-        default="hms-brain-activity",
+        default=None,
         help="WandB project name",
     )
     parser.add_argument(
@@ -267,9 +286,9 @@ if __name__ == "__main__":
     )
     
     args = parser.parse_args()
-    
-    # Override fold if specified
+        
     if args.fold is not None:
+         # Override fold if specified
         train_cfg = OmegaConf.load(args.train_config)
         train_cfg.data.current_fold = args.fold
         OmegaConf.save(train_cfg, args.train_config)
