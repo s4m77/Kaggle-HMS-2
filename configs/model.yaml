@@ -16,7 +16,7 @@ model:
     gat_num_layers: 2
     gat_heads: 4 # Multi-head attention
     gat_dropout: 0.3
-    use_edge_attr: true # Use coherence as edge weights
+    use_edge_attr: false # Use coherence as edge weights
 
     # BiLSTM parameters
     rnn_hidden_dim: 128
