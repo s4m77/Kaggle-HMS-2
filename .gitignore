@@ -5,11 +5,6 @@ data/
 logs/
 __pycache__/
 !src/data
-<<<<<<< HEAD
-condaenv.*.requirements.txt
-=======
-
-condaenv.7eaepzbl.requirements.txt
 
 checkpoints/
 .DS_Store
