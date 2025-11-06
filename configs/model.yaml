@@ -1,5 +1,7 @@
 # Multi-modal GNN Model Configuration for HMS Brain Activity Classification
 
+model_type: "multi_modal"
+
 model:
   num_classes: 6 # Seizure, LPD, GPD, LRDA, GRDA, Other
 
@@ -61,4 +63,3 @@ model:
     hidden_dims: [256, 128] # Two hidden layers
     dropout: 0.3
     activation: "elu" # Options: "relu", "gelu", "elu"
-

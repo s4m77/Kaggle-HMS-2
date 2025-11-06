@@ -1,8 +1,8 @@
-"""Main training script for HMS Multi-Modal GNN."""
+"""Main training script for HMS GNN models."""
 
 import sys
 from pathlib import Path
-import torch
+
 from omegaconf import OmegaConf
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
@@ -13,11 +13,27 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.data import HMSDataModule
-from src.lightning_trainer import HMSLightningModule
+from src.lightning_trainer import HMSLightningModule, HMSEEGOnlyLightningModule
+
+MODEL_REGISTRY = {
+    "multi_modal": {
+        "module": HMSLightningModule,
+        "title": "HMS Multi-Modal GNN Training",
+        "checkpoint_prefix": "hms",
+    },
+    "eeg_only": {
+        "module": HMSEEGOnlyLightningModule,
+        "title": "HMS EEG-Only GNN Training",
+        "checkpoint_prefix": "hms-eeg",
+    },
+}
+
+DEFAULT_MODEL_TYPE = "multi_modal"
 
 
 def train(
     train_config_path: str = "configs/train.yaml",
+    model_config_path: str | None = None,
     wandb_project: str = "hms-brain-activity",
     wandb_name: str | None = None,
     resume_from_checkpoint: str | None = None,
@@ -39,12 +55,26 @@ def train(
     """
     # Load configurations
     train_config = OmegaConf.load(train_config_path)
-    model_config = OmegaConf.load(train_config.model_config)
+    resolved_model_config_path = model_config_path or train_config.model_config
+    model_config = OmegaConf.load(resolved_model_config_path)
+    if model_config_path is not None:
+        train_config.model_config = resolved_model_config_path
+
+    model_type: str = model_config.get("model_type", DEFAULT_MODEL_TYPE)
+    if model_type not in MODEL_REGISTRY:
+        valid = ", ".join(MODEL_REGISTRY.keys())
+        raise ValueError(f"Unsupported model_type '{model_type}'. Valid options: {valid}")
+
+    registry_entry = MODEL_REGISTRY[model_type]
+    lightning_module_cls = registry_entry["module"]
+    training_title = registry_entry["title"]
+    checkpoint_prefix = registry_entry["checkpoint_prefix"]
     
     print("\n" + "="*60)
-    print("HMS Multi-Modal GNN Training")
+    print(training_title)
     print("="*60)
-    print(f"Model Config: {train_config.model_config}")
+    print(f"Model Type: {model_type}")
+    print(f"Model Config: {resolved_model_config_path}")
     print(f"Train Config: {train_config_path}")
     print(f"WandB Project: {wandb_project}")
     print(f"WandB Run: {wandb_name or 'auto-generated'}")
@@ -74,7 +104,7 @@ def train(
     
     # Initialize Lightning Module
     print("Initializing Model...")
-    model = HMSLightningModule(
+    model = lightning_module_cls(
         model_config=model_config.model,
         num_classes=model_config.model.num_classes,
         learning_rate=train_config.learning_rate,
@@ -89,12 +119,14 @@ def train(
     # Print model info
     model_info = model.get_model_info()
     print(f"\nModel Architecture:")
-    print(f"  EEG output dim:    {model_info['eeg_output_dim']}")
-    print(f"  Spec output dim:   {model_info['spec_output_dim']}")
-    print(f"  Fusion output dim: {model_info['fusion_output_dim']}")
-    print(f"  Num classes:       {model_info['num_classes']}")
-    print(f"  Total parameters:  {model_info['total_params']:,}")
-    print(f"  Trainable params:  {model_info['trainable_params']:,}\n")
+    for key, value in model_info.items():
+        label = key.replace('_', ' ').title()
+        if isinstance(value, int):
+            value_str = f"{value:,}"
+        else:
+            value_str = value
+        print(f"  {label:<20} {value_str}")
+    print()
     
     # WandB Logger
     wandb_logger = WandbLogger(
@@ -123,8 +155,8 @@ def train(
     # Note: val/loss becomes val/loss_epoch when on_epoch=True
     checkpoint_callback = ModelCheckpoint(
         dirpath="checkpoints",
-        filename="hms-epoch={epoch:02d}-val_loss={val/loss_epoch:.4f}",
-        monitor="val/loss_epoch",  # Use _epoch suffix for epoch-level metrics
+        filename=f"{checkpoint_prefix}" + "-{epoch:02d}-{val/loss:.4f}",
+        monitor="val/loss",
         mode="min",
         save_top_k=3,
         save_last=True,
@@ -215,12 +247,30 @@ def train(
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description="Train HMS Multi-Modal GNN")
+    parser = argparse.ArgumentParser(description="Train HMS GNN models")
     parser.add_argument(
         "--train-config",
         type=str,
         default="configs/train.yaml",
         help="Path to training configuration file",
+    )
+    parser.add_argument(
+        "--model-config",
+        type=str,
+        default=None,
+        help="Override path to model configuration file",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default=None,
+        help="WandB project name",
+    )
+    parser.add_argument(
+        "--wandb-name",
+        type=str,
+        default=None,
+        help="WandB run name",
     )
     parser.add_argument(
         "--resume",
@@ -236,18 +286,18 @@ if __name__ == "__main__":
     )
     
     args = parser.parse_args()
-    
-    # Override fold if specified
-    train_cfg = OmegaConf.load(args.train_config)
-    
+        
     if args.fold is not None:
+         # Override fold if specified
+        train_cfg = OmegaConf.load(args.train_config)
         train_cfg.data.current_fold = args.fold
         OmegaConf.save(train_cfg, args.train_config)
         print(f"Updated current_fold to {args.fold} in {args.train_config}")
     
     train(
         train_config_path=args.train_config,
-        wandb_project=train_cfg.wandb_project,
-        wandb_name=train_cfg.wandb_name,
+        model_config_path=args.model_config,
+        wandb_project=args.wandb_project,
+        wandb_name=args.wandb_name,
         resume_from_checkpoint=args.resume,
     )
