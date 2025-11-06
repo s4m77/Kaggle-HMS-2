@@ -4,7 +4,14 @@ num_epochs: 100
 learning_rate: 0.0003
 weight_decay: 0.0001
 wandb_project: hms-brain-activity-KL
-wandb_name: ''
+wandb_name: h200-fold0
+wandb_tags:
+- h200
+- bf16
+- gnn
+- graphs
+wandb_group: cv-folds
+wandb_job_type: train
 scheduler:
   type: ReduceLROnPlateau
   patience: 5
@@ -35,10 +42,15 @@ data:
   - 20
   - 999
   min_evaluators: 0
-  num_workers: 4
-  pin_memory: true
+  num_workers: 12
+  pin_memory: false
+  prefetch_factor: 2
   shuffle_seed: 42
-hardware: null
-device: mps
+  preload_patients: true
+hardware:
+  device: cuda
+  mixed_precision: true
+device: cuda
 mixed_precision: true
 compile_model: false
+smoke_test: false

@@ -106,6 +106,43 @@ def check_wandb():
         return False
 
 
+def check_cuda():
+    """Check CUDA/GPU availability and details."""
+    print("\n" + "="*60)
+    print("Checking CUDA / GPU")
+    print("="*60 + "\n")
+    try:
+        import torch, os
+        from multiprocessing import cpu_count
+
+        print(f"PyTorch: {torch.__version__}")
+        print(f"CUDA available: {torch.cuda.is_available()}")
+        if torch.cuda.is_available():
+            num = torch.cuda.device_count()
+            print(f"CUDA device count: {num}")
+            for i in range(num):
+                name = torch.cuda.get_device_name(i)
+                cap = torch.cuda.get_device_capability(i)
+                mem_total = torch.cuda.get_device_properties(i).total_memory // (1024**3)
+                print(f" - GPU {i}: {name}, CC {cap[0]}.{cap[1]}, VRAM ~{mem_total} GB")
+            # BF16 support check
+            bf16 = hasattr(torch.cuda, 'is_bf16_supported') and torch.cuda.is_bf16_supported()
+            print(f"BF16 supported: {bf16}")
+        else:
+            print("No CUDA device detected.")
+
+        # CPU/threads info
+        try:
+            cores = cpu_count()
+        except Exception:
+            cores = os.cpu_count() or 1
+        print(f"CPU cores: {cores}")
+        return True
+    except Exception as e:
+        print(f"✗ CUDA check failed: {e}")
+        return False
+
+
 def main():
     """Run all checks."""
     print("\n" + "="*60)
@@ -114,6 +151,7 @@ def main():
     
     checks = [
         ("Dependencies", check_imports),
+        ("CUDA/GPU", check_cuda),
         ("Data", check_data),
         ("WandB", check_wandb),
     ]

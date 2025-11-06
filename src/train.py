@@ -53,13 +53,36 @@ def train(
     resume_from_checkpoint : str, optional
         Path to checkpoint to resume from
     """
+    # Prefer TF32/better matmul perf on Tensor Core GPUs
+    try:
+        import torch.backends.cuda as cuda_backends
+        torch.set_float32_matmul_precision('high')
+        cuda_backends.matmul.allow_tf32 = True
+        cuda_backends.cudnn.allow_tf32 = True
+    except Exception:
+        pass
     # Load configurations
     train_config = OmegaConf.load(train_config_path)
-    resolved_model_config_path = model_config_path or train_config.model_config
-    model_config = OmegaConf.load(resolved_model_config_path)
-    if model_config_path is not None:
-        train_config.model_config = resolved_model_config_path
+    # Determine model config path (CLI override wins), then resolve path robustly
+    model_cfg_input = model_config_path or train_config.model_config
+    cfg_base = Path(train_config_path).parent
+    model_cfg_raw = Path(model_cfg_input)
+    if model_cfg_raw.is_absolute():
+        model_cfg_path = model_cfg_raw
+    else:
+        cand1 = (cfg_base / model_cfg_raw).resolve()
+        cand2 = (project_root / model_cfg_raw).resolve()
+        if cand1.exists():
+            model_cfg_path = cand1
+        elif cand2.exists():
+            model_cfg_path = cand2
+        else:
+            model_cfg_path = model_cfg_raw
+    model_config = OmegaConf.load(str(model_cfg_path))
+    # Persist resolved path back into train_config for logging
+    train_config.model_config = str(model_cfg_path)
 
+    # Select model type/module
     model_type: str = model_config.get("model_type", DEFAULT_MODEL_TYPE)
     if model_type not in MODEL_REGISTRY:
         valid = ", ".join(MODEL_REGISTRY.keys())
@@ -74,7 +97,7 @@ def train(
     print(training_title)
     print("="*60)
     print(f"Model Type: {model_type}")
-    print(f"Model Config: {resolved_model_config_path}")
+    print(f"Model Config: {model_cfg_path}")
     print(f"Train Config: {train_config_path}")
     print(f"WandB Project: {wandb_project}")
     print(f"WandB Run: {wandb_name or 'auto-generated'}")
@@ -83,6 +106,19 @@ def train(
     
     # Initialize DataModule with K-Fold CV
     print("Initializing DataModule...")
+    # Adjust loader aggressiveness during smoke tests to avoid system limits
+    _is_smoke = bool(getattr(train_config, "smoke_test", False))
+    preload_flag = bool(train_config.data.get('preload_patients', False))
+    dm_num_workers = train_config.data.num_workers if not _is_smoke else max(0, min(8, int(train_config.data.num_workers)))
+    # When preloading all patients into the Dataset, avoid multiprocessing to prevent pickling/FD sharing of large caches
+    if preload_flag and dm_num_workers > 0:
+        print(f"Note: preload_patients=True → forcing num_workers=0 to avoid shared-memory mmap pressure.")
+        dm_num_workers = 0
+    dm_pin_memory = train_config.data.pin_memory if not _is_smoke else False
+    dm_prefetch = train_config.data.get('prefetch_factor', 4)
+    if _is_smoke:
+        dm_prefetch = 2
+
     datamodule = HMSDataModule(
         data_dir=train_config.data.data_dir,
         train_csv=train_config.data.train_csv,
@@ -93,9 +129,11 @@ def train(
         stratify_by_evaluators=train_config.data.get('stratify_by_evaluators', False),
         evaluator_bins=train_config.data.get('evaluator_bins', [0, 5, 10, 15, 20, 999]),
         min_evaluators=train_config.data.get('min_evaluators', 0),
-        num_workers=train_config.data.num_workers,
-        pin_memory=train_config.data.pin_memory,
+        num_workers=dm_num_workers,
+        pin_memory=dm_pin_memory,
+        prefetch_factor=dm_prefetch if dm_num_workers > 0 else None,
         shuffle_seed=train_config.data.shuffle_seed,
+        preload_patients=preload_flag,
     )
     
     # Setup to get class weights
@@ -129,12 +167,29 @@ def train(
     print()
     
     # WandB Logger
-    wandb_logger = WandbLogger(
-        project=wandb_project,
-        name=wandb_name,
-        save_dir="logs",
-        log_model=True,  # Log model checkpoints to WandB
-    )
+    logger_kwargs = {
+        "project": wandb_project,
+        "name": wandb_name,
+        "save_dir": "logs",
+        "log_model": True,
+        "tags": list(getattr(train_config, "wandb_tags", []) or []),
+        "group": getattr(train_config, "wandb_group", None),
+        "job_type": getattr(train_config, "wandb_job_type", None),
+        "anonymous": "allow",  # allow logging without explicit login
+    }
+    # Optional entity
+    if hasattr(train_config, "wandb_entity") and train_config.wandb_entity:
+        logger_kwargs["entity"] = train_config.wandb_entity
+
+    # If smoke test, ensure tagging and run name reflects it
+    if getattr(train_config, "smoke_test", False):
+        logger_kwargs["tags"].append("smoke")
+        if logger_kwargs["name"]:
+            logger_kwargs["name"] = f"SMOKE-{logger_kwargs['name']}"
+        else:
+            logger_kwargs["name"] = "SMOKE"
+
+    wandb_logger = WandbLogger(**logger_kwargs)
     
     # Configure WandB to log step-level metrics
     # Note: Metrics logged with on_step=True will appear as {metric}_step in WandB
@@ -181,43 +236,80 @@ def train(
     # Trainer
     # Handle both nested (hardware.mixed_precision) and flat (mixed_precision) config structures
     if hasattr(train_config, 'hardware') and train_config.hardware is not None:
-        mixed_precision = train_config.hardware.mixed_precision
+        mixed_precision = bool(train_config.hardware.mixed_precision)
         device = getattr(train_config.hardware, 'device', 'auto')
     else:
-        mixed_precision = getattr(train_config, 'mixed_precision', False)
+        mixed_precision = bool(getattr(train_config, 'mixed_precision', False))
         device = getattr(train_config, 'device', 'auto')
-    
-    # Map device names to PyTorch Lightning accelerator names
-    # if device == 'cuda':
-    #     accelerator = 'gpu'
-    # elif device == 'mps':
-    #     accelerator = 'mps'
-    # elif device == 'cpu':
-    #     accelerator = 'cpu'
-    # else:
-    #     accelerator = 'auto'
-    accelerator = 'auto'
-    
-    # Configure precision based on device
-    # MPS doesn't support the same mixed precision as CUDA
-    if mixed_precision and device == 'cuda':
-        precision = 16
+
+    # Accelerator selection
+    if device == 'cuda' or (device == 'auto' and torch.cuda.is_available()):
+        accelerator = 'gpu'
+    elif device == 'mps':
+        accelerator = 'mps'
+    elif device == 'cpu':
+        accelerator = 'cpu'
     else:
-        # Use 32-bit precision for MPS and CPU (MPS has native optimizations)
+        accelerator = 'auto'
+
+    # Precision selection: prefer bf16 on Hopper/Ampere
+    if accelerator == 'gpu' and torch.cuda.is_available():
+        # Try BF16 mixed precision when available (H100/H200 and many Ampere GPUs)
+        try:
+            cc = torch.cuda.get_device_capability(0)
+        except Exception:
+            cc = (0, 0)
+        bf16_supported = hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported()
+        if mixed_precision and (bf16_supported or cc[0] >= 8):
+            precision = "bf16-mixed"
+        elif mixed_precision:
+            precision = "16-mixed"
+        else:
+            precision = 32
+    else:
         precision = 32
+
+    # Optionally compile model for PyTorch 2.x
+    if getattr(train_config, "compile_model", False) and hasattr(torch, "compile") and accelerator == 'gpu':
+        try:
+            model = torch.compile(model, mode="max-autotune")
+            print("Enabled torch.compile with mode=max-autotune")
+        except Exception as e:
+            print(f"torch.compile failed, continuing without compile: {e}")
+
+    # Enable cuDNN benchmark for faster LSTM/convolution if shapes are static
+    try:
+        if accelerator == 'gpu':
+            import torch.backends.cudnn as cudnn
+            cudnn.benchmark = True
+    except Exception:
+        pass
     
-    trainer = Trainer(
+    trainer_kwargs = dict(
         max_epochs=train_config.num_epochs,
-        accelerator=accelerator,  # Use configured device
+        accelerator=accelerator,
         devices=1,
         logger=wandb_logger,
         callbacks=callbacks,
         precision=precision,
-        gradient_clip_val=1.0,  # Clip gradients to prevent exploding gradients
+        gradient_clip_val=1.0,
         log_every_n_steps=10,
-        val_check_interval=0.25,  # Run validation twice per epoch (every 50% of training data)
-        deterministic=False,  # Set to True for reproducibility (slower)
+        val_check_interval=0.25,
+        deterministic=False,
     )
+
+    # Smoke test limits for super-fast runs
+    if getattr(train_config, "smoke_test", False):
+        trainer_kwargs.update({
+            "max_epochs": 1,
+            "limit_train_batches": 2,
+            "limit_val_batches": 2,
+            "limit_test_batches": 2,
+            "num_sanity_val_steps": 0,
+            "log_every_n_steps": 1,
+        })
+
+    trainer = Trainer(**trainer_kwargs)
     
     # Train
     print("Starting training...\n")
@@ -286,18 +378,18 @@ if __name__ == "__main__":
     )
     
     args = parser.parse_args()
-        
+
+    # Load config to allow defaults for WandB and to update fold
+    train_cfg = OmegaConf.load(args.train_config)
     if args.fold is not None:
-         # Override fold if specified
-        train_cfg = OmegaConf.load(args.train_config)
         train_cfg.data.current_fold = args.fold
         OmegaConf.save(train_cfg, args.train_config)
         print(f"Updated current_fold to {args.fold} in {args.train_config}")
-    
+
     train(
         train_config_path=args.train_config,
         model_config_path=args.model_config,
-        wandb_project=args.wandb_project,
-        wandb_name=args.wandb_name,
+        wandb_project=(args.wandb_project or train_cfg.get('wandb_project', 'hms-brain-activity')),
+        wandb_name=(args.wandb_name or train_cfg.get('wandb_name', None)),
         resume_from_checkpoint=args.resume,
     )

@@ -41,11 +41,13 @@ class HMSDataset(Dataset):
         metadata_df: pd.DataFrame,
         is_train: bool = True,
         transform: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+        preload_patients: bool = False,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.metadata_df = metadata_df.reset_index(drop=True)
         self.is_train = is_train
         self.transform = transform
+        self.preload_patients = preload_patients
         
         # Build index: list of indices into metadata_df
         self.sample_indices: List[int] = list(range(len(self.metadata_df)))
@@ -59,6 +61,17 @@ class HMSDataset(Dataset):
             'GRDA': 4,
             'Other': 5,
         }
+
+        # In-memory per-patient cache to avoid repeated disk I/O and serialization
+        self._patient_cache: Dict[int, Dict[int, Dict[str, Any]]] = {}
+
+        if self.preload_patients:
+            # Preload and sanitize all referenced patients (uses RAM; ensure capacity)
+            for pid in sorted(self.metadata_df['patient_id'].unique()):
+                path = self.data_dir / f"patient_{int(pid)}.pt"
+                if path.exists():
+                    data = torch.load(path, weights_only=False)
+                    self._patient_cache[int(pid)] = self._sanitize_patient_data(data)
         
     def __len__(self) -> int:
         """Return total number of samples."""
@@ -89,28 +102,21 @@ class HMSDataset(Dataset):
         patient_id = int(row['patient_id'])
         label_id = int(row['label_id'])
         
-        # Load patient file (use weights_only=False for PyG Data objects)
-        patient_path = self.data_dir / f"patient_{patient_id}.pt"
-        patient_data = torch.load(patient_path, weights_only=False)
+        # Load patient file (cache and sanitize once per patient)
+        if patient_id in self._patient_cache:
+            patient_data = self._patient_cache[patient_id]
+        else:
+            patient_path = self.data_dir / f"patient_{patient_id}.pt"
+            patient_data = torch.load(patient_path, weights_only=False)
+            patient_data = self._sanitize_patient_data(patient_data)
+            self._patient_cache[patient_id] = patient_data
         
         # Get specific label data
         sample_data = patient_data[label_id]
         
-        # Clean NaN/Inf from graphs (safety check for corrupted preprocessing)
+        # Already sanitized on load
         eeg_graphs = sample_data['eeg_graphs']
         spec_graphs = sample_data['spec_graphs']
-        
-        # Replace NaN/Inf in EEG graph features
-        for graph in eeg_graphs:
-            if hasattr(graph, 'x') and graph.x is not None:
-                graph.x = torch.nan_to_num(graph.x, nan=0.0, posinf=0.0, neginf=0.0)
-            if hasattr(graph, 'edge_attr') and graph.edge_attr is not None:
-                graph.edge_attr = torch.nan_to_num(graph.edge_attr, nan=0.0, posinf=1.0, neginf=0.0)
-        
-        # Replace NaN/Inf in Spec graph features
-        for graph in spec_graphs:
-            if hasattr(graph, 'x') and graph.x is not None:
-                graph.x = torch.nan_to_num(graph.x, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Construct sample
         sample = {
@@ -125,6 +131,25 @@ class HMSDataset(Dataset):
             sample = self.transform(sample)
         
         return sample
+
+    def _sanitize_patient_data(self, patient_data: Dict[int, Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
+        """Sanitize NaN/Inf in features once per patient and drop gamma band if present."""
+        for lbl_id, item in patient_data.items():
+            # EEG graphs
+            for g in item.get('eeg_graphs', []):
+                if hasattr(g, 'x') and g.x is not None:
+                    g.x = torch.nan_to_num(g.x, nan=0.0, posinf=0.0, neginf=0.0)
+                if hasattr(g, 'edge_attr') and g.edge_attr is not None:
+                    g.edge_attr = torch.nan_to_num(g.edge_attr, nan=0.0, posinf=1.0, neginf=0.0)
+            # Spec graphs
+            for g in item.get('spec_graphs', []):
+                if hasattr(g, 'x') and g.x is not None:
+                    x = torch.nan_to_num(g.x, nan=0.0, posinf=0.0, neginf=0.0)
+                    # Ensure 4 features (drop gamma if accidentally present)
+                    if x.dim() == 2 and x.size(1) == 5:
+                        x = x[:, :4]
+                    g.x = x
+        return patient_data
     
     def get_class_distribution(self) -> Dict[int, int]:
         """Get distribution of classes in dataset.
@@ -209,22 +234,20 @@ def collate_graphs(batch: List[Dict]) -> Dict:
         batched_graph = Batch.from_data_list(graphs_at_t)
         batched_eeg_graphs.append(batched_graph)
     
-    # Batch Spectrogram graphs: drop the 5th feature (gamma band - always 0)
+    # Batch Spectrogram graphs: subsample timesteps globally to reduce object count
+    all_spec_steps = len(spec_sequences[0])
+    max_spec_steps = 40
+    if all_spec_steps > max_spec_steps:
+        keep_idx = np.linspace(0, all_spec_steps - 1, max_spec_steps, dtype=int)
+        spec_sequences = [[seq[i] for i in keep_idx] for seq in spec_sequences]
     num_spec_timesteps = len(spec_sequences[0])
     batched_spec_graphs = []
     for t in range(num_spec_timesteps):
         graphs_at_t = [spec_sequences[b][t] for b in range(batch_size)]
-
-        if len(graphs_at_t) > 40:  # If more than 40 spec windows
-            indices = np.linspace(0, len(graphs_at_t)-1, 40, dtype=int)
-            graphs_at_t = [graphs_at_t[i] for i in indices]
-        
-        # Drop the 5th feature (index 4) from each graph's node features
+        # Safety: ensure 4 features
         for graph in graphs_at_t:
-            if graph.x.size(1) == 5:  # If has 5 features, drop the last one
-                graph.x = graph.x[:, :4]  # Keep only first 4 features (delta, theta, alpha, beta)
-        
-        # Batch them into single PyG Batch object
+            if hasattr(graph, 'x') and graph.x is not None and graph.x.dim() == 2 and graph.x.size(1) == 5:
+                graph.x = graph.x[:, :4]
         batched_graph = Batch.from_data_list(graphs_at_t)
         batched_spec_graphs.append(batched_graph)
     
