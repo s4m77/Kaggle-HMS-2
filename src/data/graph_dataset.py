@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Dict, List, Optional, Callable, Any
+try:
+    from tqdm import tqdm
+except Exception:
+    # Fallback if tqdm is not available
+    def tqdm(iterable, **kwargs):
+        return iterable
 
 import torch
 import pandas as pd
@@ -42,12 +48,14 @@ class HMSDataset(Dataset):
         is_train: bool = True,
         transform: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         preload_patients: bool = False,
+        remote_cache: Optional[Dict[int, Dict[int, Dict[str, Any]]]] = None,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.metadata_df = metadata_df.reset_index(drop=True)
         self.is_train = is_train
         self.transform = transform
         self.preload_patients = preload_patients
+        self.remote_cache = remote_cache
         
         # Build index: list of indices into metadata_df
         self.sample_indices: List[int] = list(range(len(self.metadata_df)))
@@ -65,9 +73,10 @@ class HMSDataset(Dataset):
         # In-memory per-patient cache to avoid repeated disk I/O and serialization
         self._patient_cache: Dict[int, Dict[int, Dict[str, Any]]] = {}
 
-        if self.preload_patients:
+        if self.remote_cache is None and self.preload_patients:
             # Preload and sanitize all referenced patients (uses RAM; ensure capacity)
-            for pid in sorted(self.metadata_df['patient_id'].unique()):
+            unique_pids = sorted(self.metadata_df['patient_id'].unique())
+            for pid in tqdm(unique_pids, desc="Preloading patients", total=len(unique_pids)):
                 path = self.data_dir / f"patient_{int(pid)}.pt"
                 if path.exists():
                     data = torch.load(path, weights_only=False)
@@ -103,7 +112,9 @@ class HMSDataset(Dataset):
         label_id = int(row['label_id'])
         
         # Load patient file (cache and sanitize once per patient)
-        if patient_id in self._patient_cache:
+        if self.remote_cache is not None:
+            patient_data = self.remote_cache[patient_id]
+        elif patient_id in self._patient_cache:
             patient_data = self._patient_cache[patient_id]
         else:
             patient_path = self.data_dir / f"patient_{patient_id}.pt"

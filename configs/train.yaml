@@ -1,5 +1,5 @@
 model_config: configs/model.yaml
-batch_size: 32
+batch_size: 128
 num_epochs: 100
 learning_rate: 0.0003
 weight_decay: 0.0001
@@ -43,7 +43,7 @@ data:
   - 999
   min_evaluators: 0
   num_workers: 12
-  pin_memory: false
+  pin_memory: true
   prefetch_factor: 2
   shuffle_seed: 42
   preload_patients: true
