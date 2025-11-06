@@ -1,6 +1,6 @@
 """
 EEG preprocessing utilities for graph construction.
-Extracts PSD (Power Spectral Density) features and AEC (Amplitude Envelope Correlation) edges.
+Extracts PSD (Power Spectral Density) features and builds graphs based on physical electrode adjacency.
 Includes signal preprocessing: band-pass filter, notch filter, and normalization.
 """
 
@@ -8,9 +8,34 @@ import numpy as np
 import torch
 import warnings
 from scipy import signal
-from scipy.signal import butter, filtfilt, iirnotch, hilbert
+from scipy.signal import butter, filtfilt, iirnotch
 from typing import List, Tuple, Dict, Optional
 from torch_geometric.data import Data
+
+
+# Physical electrode adjacency based on 10-20 system
+# Each electrode is connected to its spatial neighbors on the scalp
+ELECTRODE_ADJACENCY = {
+    'Fp1': ['F7', 'F3', 'Fp2'],
+    'Fp2': ['Fp1', 'F4', 'F8'],
+    'F7': ['Fp1', 'F3', 'T3'],
+    'F3': ['Fp1', 'F7', 'Fz', 'C3'],
+    'Fz': ['F3', 'F4', 'Cz'],
+    'F4': ['Fp2', 'Fz', 'F8', 'C4'],
+    'F8': ['Fp2', 'F4', 'T4'],
+    'T3': ['F7', 'C3', 'T5'],
+    'C3': ['F3', 'T3', 'Cz', 'P3'],
+    'Cz': ['Fz', 'C3', 'C4', 'Pz'],
+    'C4': ['F4', 'Cz', 'T4', 'P4'],
+    'T4': ['F8', 'C4', 'T6'],
+    'T5': ['T3', 'P3', 'O1'],
+    'P3': ['C3', 'T5', 'Pz', 'O1'],
+    'Pz': ['Cz', 'P3', 'P4'],
+    'P4': ['C4', 'Pz', 'T6', 'O2'],
+    'T6': ['T4', 'P4', 'O2'],
+    'O1': ['T5', 'P3', 'O2'],
+    'O2': ['P4', 'T6', 'O1'],
+}
 
 
 def apply_bandpass_filter(
@@ -265,74 +290,46 @@ class EEGGraphBuilder:
         
         return psd_features
     
-    def compute_aec_matrix(self, eeg_window: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def compute_physical_adjacency_edges(self) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Compute Amplitude Envelope Correlation (AEC) between all channel pairs.
-        
-        AEC measures functional connectivity by correlating the amplitude envelopes
-        of bandpass-filtered signals using the Hilbert transform.
-        
-        Args:
-            eeg_window: (n_samples, n_channels) array
+        Create edges based on physical electrode adjacency on the scalp.
+        Uses the 10-20 system spatial layout - electrodes are connected if they're neighbors.
         
         Returns:
             edge_index: (2, n_edges) array
-            edge_attr: (n_edges, 1) array of AEC values
+            edge_attr: (n_edges, 1) array of ones (unweighted edges)
         """
-        n_channels = eeg_window.shape[1]
+        if self.channels is None:
+            raise ValueError("Channels must be specified to use physical adjacency")
+        
+        # Create channel name to index mapping
+        channel_to_idx = {ch: idx for idx, ch in enumerate(self.channels)}
+        
         edges = []
-        weights = []
         
-        # For AEC, we'll use the broadband signal (already preprocessed)
-        # Extract amplitude envelopes using Hilbert transform
-        envelopes = np.zeros_like(eeg_window)
-        
-        for ch_idx in range(n_channels):
-            # Apply Hilbert transform to get analytic signal
-            analytic_signal = hilbert(eeg_window[:, ch_idx])
-            # Extract amplitude envelope (magnitude of analytic signal)
-            envelopes[:, ch_idx] = np.abs(analytic_signal)
-        
-        # Compute correlation between amplitude envelopes for all channel pairs
-        for i in range(n_channels):
-            for j in range(i + 1, n_channels):
-                # Skip if either channel has near-zero variance
-                if np.std(envelopes[:, i]) < 1e-10 or np.std(envelopes[:, j]) < 1e-10:
+        # Build edges based on physical adjacency
+        for src_ch, neighbors in ELECTRODE_ADJACENCY.items():
+            if src_ch not in channel_to_idx:
+                continue
+                
+            src_idx = channel_to_idx[src_ch]
+            
+            for tgt_ch in neighbors:
+                if tgt_ch not in channel_to_idx:
                     continue
-                
-                # Compute Pearson correlation between envelopes
-                # Suppress warnings for edge cases
-                with warnings.catch_warnings():
-                    warnings.filterwarnings('ignore', category=RuntimeWarning)
                     
-                    # Normalize envelopes (z-score)
-                    env_i = (envelopes[:, i] - np.mean(envelopes[:, i])) / (np.std(envelopes[:, i]) + 1e-10)
-                    env_j = (envelopes[:, j] - np.mean(envelopes[:, j])) / (np.std(envelopes[:, j]) + 1e-10)
-                    
-                    # Compute correlation
-                    aec = np.corrcoef(env_i, env_j)[0, 1]
+                tgt_idx = channel_to_idx[tgt_ch]
                 
-                # Check for NaN values
-                if np.isnan(aec):
-                    continue
-                
-                # Add edge if AEC exceeds threshold (take absolute value for correlation)
-                aec_abs = np.abs(aec)
-                if aec_abs > self.aec_threshold and not np.isnan(aec_abs):
-                    # Add both directions (undirected graph)
-                    edges.append([i, j])
-                    edges.append([j, i])
-                    weights.append(aec_abs)
-                    weights.append(aec_abs)
+                # Add edge (will be bidirectional since adjacency is symmetric)
+                edges.append([src_idx, tgt_idx])
+        
+        if not edges:
+            # No edges found - return empty arrays
+            return np.zeros((2, 0), dtype=np.int64), np.zeros((0, 1), dtype=np.float32)
         
         # Convert to arrays
-        if edges:
-            edge_index = np.array(edges, dtype=np.int64).T  # (2, n_edges)
-            edge_attr = np.array(weights, dtype=np.float32).reshape(-1, 1)  # (n_edges, 1)
-        else:
-            # No edges above threshold - create empty arrays
-            edge_index = np.zeros((2, 0), dtype=np.int64)
-            edge_attr = np.zeros((0, 1), dtype=np.float32)
+        edge_index = np.array(edges, dtype=np.int64).T  # (2, n_edges)
+        edge_attr = np.ones((len(edges), 1), dtype=np.float32)  # Unweighted edges
         
         return edge_index, edge_attr
     
@@ -346,14 +343,14 @@ class EEGGraphBuilder:
             is_center: Whether this window contains the labeled region
         
         Returns:
-            PyG Data object with node features (PSD), edges (AEC), and temporal position
+            PyG Data object with node features (PSD), edges (physical adjacency), and temporal position
         """
         # Compute node features: Power Spectral Density
         psd_features = self.compute_psd(eeg_window)  # (n_channels, n_bands)
         x = torch.tensor(psd_features, dtype=torch.float)
         
-        # Compute edges: Amplitude Envelope Correlation
-        edge_index, edge_attr = self.compute_aec_matrix(eeg_window)
+        # Compute edges: Physical electrode adjacency (same for all windows)
+        edge_index, edge_attr = self.compute_physical_adjacency_edges()
         edge_index = torch.tensor(edge_index, dtype=torch.long)
         edge_attr = torch.tensor(edge_attr, dtype=torch.float)
         
