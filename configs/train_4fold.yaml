@@ -1,0 +1,59 @@
+model_config: configs/model.yaml
+batch_size: 128
+num_epochs: 100
+learning_rate: 0.0003
+weight_decay: 0.0001
+wandb_project: hms-brain-activity-KL
+wandb_name: h200-fold0
+wandb_tags:
+- h200
+- bf16
+- gnn
+- graphs
+- 4fold
+wandb_group: cv-4fold
+wandb_job_type: train
+scheduler:
+  type: ReduceLROnPlateau
+  patience: 5
+  factor: 0.5
+  min_lr: 1.0e-05
+early_stopping:
+  patience: 10
+  monitor: val/loss_epoch
+  mode: min
+use_class_weights: false
+loss: KLDivLoss
+regularization:
+  weight_decay: 0.0001
+  graph_laplacian_lambda: 0.0
+  edge_weight_penalty: 0.0
+data:
+  data_dir: data/processed
+  train_csv: data/raw/train_unique.csv
+  n_folds: 4
+  current_fold: 2
+  stratify_by_class: false
+  stratify_by_evaluators: true
+  evaluator_bins:
+  - 0
+  - 5
+  - 10
+  - 15
+  - 20
+  - 999
+  min_evaluators: 0
+  num_workers: 24
+  pin_memory: true
+  prefetch_factor: 2
+  shuffle_seed: 42
+  preload_patients: true
+  build_scope: train+val
+  build_workers: 32
+hardware:
+  device: cuda
+  mixed_precision: true
+device: cuda
+mixed_precision: true
+compile_model: false
+smoke_test: false
