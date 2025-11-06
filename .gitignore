@@ -1,14 +1,8 @@
 docs/
 data/
-
 .pytest_cache
-
 .vscode
-
-docs/
 logs/
-__pycache__
-
-!src/data
-
 __pycache__/
+!src/data
+condaenv.*.requirements.txt
