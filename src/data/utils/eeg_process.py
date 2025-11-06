@@ -1,6 +1,6 @@
 """
 EEG preprocessing utilities for graph construction.
-Extracts band power features and coherence-based edges from raw EEG signals.
+Extracts PSD (Power Spectral Density) features and AEC (Amplitude Envelope Correlation) edges.
 Includes signal preprocessing: band-pass filter, notch filter, and normalization.
 """
 
@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import warnings
 from scipy import signal
-from scipy.signal import coherence, butter, filtfilt, iirnotch
+from scipy.signal import butter, filtfilt, iirnotch, hilbert
 from typing import List, Tuple, Dict, Optional
 from torch_geometric.data import Data
 
@@ -112,7 +112,7 @@ class EEGGraphBuilder:
         window_size: int = 10,
         stride: int = 5,
         bands: Optional[Dict[str, List[float]]] = None,
-        coherence_threshold: float = 0.5,
+        aec_threshold: float = 0.5,
         nperseg_factor: int = 2,
         channels: Optional[List[str]] = None,
         # Preprocessing parameters
@@ -131,8 +131,8 @@ class EEGGraphBuilder:
             window_size: Window size in seconds
             stride: Stride in seconds for sliding window
             bands: Dictionary of frequency bands {name: [low, high]}
-            coherence_threshold: Minimum coherence for edge creation
-            nperseg_factor: Factor for nperseg in Welch's method
+            aec_threshold: Minimum Amplitude Envelope Correlation for edge creation
+            nperseg_factor: Factor for nperseg in Welch's method (for PSD)
             channels: List of channel names to use (excludes EKG)
             apply_bandpass: Whether to apply band-pass filter
             bandpass_low: Low cutoff for band-pass filter (Hz)
@@ -153,7 +153,7 @@ class EEGGraphBuilder:
             'beta': [13.0, 30.0],
             'gamma': [30.0, 50.0]
         }
-        self.coherence_threshold = coherence_threshold
+        self.aec_threshold = aec_threshold
         self.nperseg = sampling_rate * nperseg_factor
         self.channels = channels
         
@@ -229,19 +229,19 @@ class EEGGraphBuilder:
         
         return windows
     
-    def compute_band_power(self, eeg_window: np.ndarray) -> np.ndarray:
+    def compute_psd(self, eeg_window: np.ndarray) -> np.ndarray:
         """
-        Compute power in each frequency band for each channel.
+        Compute Power Spectral Density for each channel across frequency bands.
         
         Args:
             eeg_window: (n_samples, n_channels) array
         
         Returns:
-            (n_channels, n_bands) array of band powers
+            (n_channels, n_bands) array of PSD values
         """
         n_channels = eeg_window.shape[1]
         n_bands = len(self.bands)
-        powers = np.zeros((n_channels, n_bands))
+        psd_features = np.zeros((n_channels, n_bands))
         
         for ch_idx in range(n_channels):
             # Compute power spectral density using Welch's method
@@ -251,68 +251,79 @@ class EEGGraphBuilder:
                 nperseg=min(self.nperseg, len(eeg_window[:, ch_idx]))
             )
             
-            # Compute power in each band
+            # Compute average PSD in each frequency band
             for band_idx, (band_name, (low, high)) in enumerate(self.bands.items()):
                 # Find frequencies in this band
                 idx_band = np.logical_and(freqs >= low, freqs <= high)
                 
                 if np.any(idx_band):
-                    # Integrate power using trapezoidal rule
-                    power = np.trapz(psd[idx_band], freqs[idx_band])
-                    powers[ch_idx, band_idx] = power
+                    # Average PSD in this band (use mean instead of integral for normalization)
+                    avg_psd = np.mean(psd[idx_band])
+                    psd_features[ch_idx, band_idx] = avg_psd
                 else:
-                    powers[ch_idx, band_idx] = 0.0
+                    psd_features[ch_idx, band_idx] = 0.0
         
-        return powers
+        return psd_features
     
-    def compute_coherence_matrix(self, eeg_window: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def compute_aec_matrix(self, eeg_window: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Compute coherence between all channel pairs.
+        Compute Amplitude Envelope Correlation (AEC) between all channel pairs.
+        
+        AEC measures functional connectivity by correlating the amplitude envelopes
+        of bandpass-filtered signals using the Hilbert transform.
         
         Args:
             eeg_window: (n_samples, n_channels) array
         
         Returns:
             edge_index: (2, n_edges) array
-            edge_attr: (n_edges, 1) array of coherence values
+            edge_attr: (n_edges, 1) array of AEC values
         """
         n_channels = eeg_window.shape[1]
         edges = []
         weights = []
         
-        # Compute coherence for all channel pairs
+        # For AEC, we'll use the broadband signal (already preprocessed)
+        # Extract amplitude envelopes using Hilbert transform
+        envelopes = np.zeros_like(eeg_window)
+        
+        for ch_idx in range(n_channels):
+            # Apply Hilbert transform to get analytic signal
+            analytic_signal = hilbert(eeg_window[:, ch_idx])
+            # Extract amplitude envelope (magnitude of analytic signal)
+            envelopes[:, ch_idx] = np.abs(analytic_signal)
+        
+        # Compute correlation between amplitude envelopes for all channel pairs
         for i in range(n_channels):
             for j in range(i + 1, n_channels):
-                # Skip if either channel has near-zero variance (flat-line)
-                if np.std(eeg_window[:, i]) < 1e-10 or np.std(eeg_window[:, j]) < 1e-10:
+                # Skip if either channel has near-zero variance
+                if np.std(envelopes[:, i]) < 1e-10 or np.std(envelopes[:, j]) < 1e-10:
                     continue
                 
-                # Compute coherence between channels i and j
-                # Suppress divide-by-zero warnings from scipy
+                # Compute Pearson correlation between envelopes
+                # Suppress warnings for edge cases
                 with warnings.catch_warnings():
-                    warnings.filterwarnings('ignore', category=RuntimeWarning, 
-                                          message='invalid value encountered in divide')
-                    freqs, coh = coherence(
-                        eeg_window[:, i],
-                        eeg_window[:, j],
-                        fs=self.sampling_rate,
-                        nperseg=min(self.nperseg, len(eeg_window[:, i]))
-                    )
+                    warnings.filterwarnings('ignore', category=RuntimeWarning)
+                    
+                    # Normalize envelopes (z-score)
+                    env_i = (envelopes[:, i] - np.mean(envelopes[:, i])) / (np.std(envelopes[:, i]) + 1e-10)
+                    env_j = (envelopes[:, j] - np.mean(envelopes[:, j])) / (np.std(envelopes[:, j]) + 1e-10)
+                    
+                    # Compute correlation
+                    aec = np.corrcoef(env_i, env_j)[0, 1]
                 
-                # Check for NaN values in coherence
-                if np.any(np.isnan(coh)):
+                # Check for NaN values
+                if np.isnan(aec):
                     continue
                 
-                # Average coherence across all frequencies
-                avg_coh = np.mean(coh)
-                
-                # Add edge if coherence exceeds threshold and is valid
-                if avg_coh > self.coherence_threshold and not np.isnan(avg_coh):
+                # Add edge if AEC exceeds threshold (take absolute value for correlation)
+                aec_abs = np.abs(aec)
+                if aec_abs > self.aec_threshold and not np.isnan(aec_abs):
                     # Add both directions (undirected graph)
                     edges.append([i, j])
                     edges.append([j, i])
-                    weights.append(avg_coh)
-                    weights.append(avg_coh)
+                    weights.append(aec_abs)
+                    weights.append(aec_abs)
         
         # Convert to arrays
         if edges:
@@ -335,14 +346,14 @@ class EEGGraphBuilder:
             is_center: Whether this window contains the labeled region
         
         Returns:
-            PyG Data object with node features, edges, and temporal position
+            PyG Data object with node features (PSD), edges (AEC), and temporal position
         """
-        # Compute node features (band powers)
-        band_power = self.compute_band_power(eeg_window)  # (n_channels, n_bands)
-        x = torch.tensor(band_power, dtype=torch.float)
+        # Compute node features: Power Spectral Density
+        psd_features = self.compute_psd(eeg_window)  # (n_channels, n_bands)
+        x = torch.tensor(psd_features, dtype=torch.float)
         
-        # Compute edges (coherence-based)
-        edge_index, edge_attr = self.compute_coherence_matrix(eeg_window)
+        # Compute edges: Amplitude Envelope Correlation
+        edge_index, edge_attr = self.compute_aec_matrix(eeg_window)
         edge_index = torch.tensor(edge_index, dtype=torch.long)
         edge_attr = torch.tensor(edge_attr, dtype=torch.float)
         

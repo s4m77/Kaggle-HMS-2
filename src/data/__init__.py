@@ -8,8 +8,10 @@ from .utils import (
     SpectrogramGraphBuilder,
     filter_spectrogram_columns,
 )
-from .graph_dataset import HMSDataset, collate_graphs
-from .graph_datamodule import HMSDataModule
+from src.data.graph_dataset import HMSDataset, collate_graphs
+from src.data.graph_datamodule import HMSDataModule
+from src.data.graph_dataset_online import HMSOnlineDataset, custom_collate_fn
+from src.data.graph_datamodule_online import HMSOnlineDataModule
 
 __all__ = [
     'EEGGraphBuilder',
@@ -19,4 +21,7 @@ __all__ = [
     'HMSDataset',
     'collate_graphs',
     'HMSDataModule',
+    'HMSOnlineDataset',
+    'custom_collate_fn',
+    'HMSOnlineDataModule',
 ]

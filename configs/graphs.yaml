@@ -30,7 +30,7 @@ eeg:
   window_size: 10 # seconds - matches labeled region duration
   stride: 5 # seconds - 50% overlap
 
-  # Frequency bands for feature extraction
+  # Frequency bands for feature extraction (PSD computation)
   bands:
     delta: [0.5, 4.0]
     theta: [4.0, 8.0]
@@ -38,11 +38,16 @@ eeg:
     beta: [13.0, 30.0]
     gamma: [30.0, 50.0]
 
-  # Coherence-based edge construction
-  coherence:
-    threshold: 0.5 # Minimum coherence to create edge
-    nperseg_factor: 2 # nperseg = sampling_rate * nperseg_factor
-    method: "welch" # Method for coherence computation
+  # Amplitude Envelope Correlation (AEC) for edge construction
+  aec:
+    threshold: 0.5 # Minimum AEC to create edge (correlation of amplitude envelopes)
+    # AEC uses Hilbert transform to extract amplitude envelopes
+    # Then computes Pearson correlation between envelopes
+
+  # PSD computation parameters
+  psd:
+    nperseg_factor: 2 # nperseg = sampling_rate * nperseg_factor (for Welch's method)
+    method: "welch" # Method for PSD computation
 
   # Channel names (exclude EKG)
   channels:
