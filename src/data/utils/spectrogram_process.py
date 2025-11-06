@@ -217,6 +217,9 @@ class SpectrogramGraphBuilder:
         # Aggregate frequency bands (n_regions, n_bands)
         features = self.aggregate_frequency_bands(spec_window)
         x = torch.tensor(features, dtype=torch.float)
+        # Drop gamma band if present to align with 4-channel spec encoder (delta, theta, alpha, beta)
+        if x.dim() == 2 and x.size(1) > 4:
+            x = x[:, :4]
         
         # Create spatial edges (fixed connectivity)
         edge_index = torch.tensor(self.spatial_edges, dtype=torch.long).T  # (2, n_edges)

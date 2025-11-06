@@ -2,7 +2,8 @@
 Training script with on-the-fly graph generation.
 
 This script uses HMSOnlineDataModule to generate graphs dynamically during training
-instead of loading pre-computed graphs from disk.
+instead of loading pre-computed graphs from disk. Optimized for modern GPUs (H100/H200)
+with BF16/TF32, optional torch.compile, and tuned DataLoader settings.
 
 Usage:
     python src/train_online.py --fold 0
@@ -13,6 +14,8 @@ import sys
 import argparse
 from pathlib import Path
 from omegaconf import OmegaConf
+import torch
+import pandas as pd
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
@@ -21,7 +24,8 @@ from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, Learning
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.data import HMSOnlineDataModule
+from src.data import HMSOnlineDataModule, HMSDataModule
+from src.data.build_processed import build_missing_processed
 from src.lightning_trainer import HMSLightningModule
 from src.models import HMSMultiModalGNN
 
@@ -36,10 +40,40 @@ def main():
     parser.add_argument('--resume', type=str, default=None, help='Resume from checkpoint')
     args = parser.parse_args()
     
+    # Prefer TF32/better matmul perf on Tensor Core GPUs
+    try:
+        import torch.backends.cuda as cuda_backends
+        torch.set_float32_matmul_precision('high')
+        cuda_backends.matmul.allow_tf32 = True
+        cuda_backends.cudnn.allow_tf32 = True
+        try:
+            import torch._dynamo as dynamo
+            dynamo.config.capture_scalar_outputs = True
+        except Exception:
+            pass
+    except Exception:
+        pass
+
     # Load configurations
     train_config = OmegaConf.load(args.config)
     graph_config = OmegaConf.load(args.graph_config)
-    model_config = OmegaConf.load(train_config.model_config)
+    # Resolve model config path robustly (allow relative to config dir or project root)
+    model_cfg_input = train_config.model_config
+    cfg_base = Path(args.config).parent
+    model_cfg_raw = Path(model_cfg_input)
+    if model_cfg_raw.is_absolute():
+        model_cfg_path = model_cfg_raw
+    else:
+        cand1 = (cfg_base / model_cfg_raw).resolve()
+        cand2 = (project_root / model_cfg_raw).resolve()
+        if cand1.exists():
+            model_cfg_path = cand1
+        elif cand2.exists():
+            model_cfg_path = cand2
+        else:
+            model_cfg_path = model_cfg_raw
+    model_config = OmegaConf.load(str(model_cfg_path))
+    train_config.model_config = str(model_cfg_path)
     
     # Override fold if specified
     if args.fold is not None:
@@ -85,17 +119,71 @@ def main():
         min_evaluators=train_config.data.min_evaluators,
         num_workers=train_config.data.num_workers,
         pin_memory=train_config.data.pin_memory,
-        cache_raw_data=True,  # Cache raw data in memory for speed
+        # Per latest direction: no caching across or within run
+        cache_raw_data=False,
+        prefetch_factor=getattr(train_config.data, 'prefetch_factor', 2),
         shuffle_seed=train_config.data.shuffle_seed,
     )
     
     # Setup datasets (creates train/val split)
     datamodule.setup()
+
+    # Optional: Build processed graphs once, then switch to processed DataModule
+    auto_build = bool(getattr(train_config.data, 'auto_build_processed', True))
+    processed_dir = Path(getattr(train_config.data, 'data_dir', 'data/processed'))
+    if auto_build:
+        print("\n[1b/4] Building missing processed patient files (one-time)...")
+        # Build for patients present in this fold (train + val)
+        train_meta = datamodule.train_dataset.metadata_df
+        val_meta = datamodule.val_dataset.metadata_df
+        build_scope = str(getattr(train_config.data, 'build_scope', 'train+val'))
+        if build_scope == 'train-only':
+            fold_meta = train_meta
+            print("Building scope: train-only")
+        elif build_scope == 'val-only':
+            fold_meta = val_meta
+            print("Building scope: val-only")
+        else:
+            fold_meta = pd.concat([train_meta, val_meta], ignore_index=True)
+            print("Building scope: train+val")
+        build_missing_processed(
+            metadata=fold_meta,
+            raw_data_dir=Path("data/raw"),
+            processed_dir=processed_dir,
+            eeg_builder=datamodule.eeg_builder,
+            spec_builder=datamodule.spec_builder,
+            patient_ids=fold_meta['patient_id'].unique(),
+            overwrite=False,
+        )
+        # Switch to processed DataModule with in-RAM preload for fast training
+        # When preloading, prefer num_workers=0 to avoid shared-memory pressure
+        preload_flag = True
+        dm_workers = 0
+        prefetch = None
+        pin_mem = bool(getattr(train_config.data, 'pin_memory', False))
+        print("[1c/4] Switching to processed DataModule with preload (RAM)...")
+        datamodule = HMSDataModule(
+            data_dir=str(processed_dir),
+            train_csv=train_config.data.train_csv,
+            batch_size=train_config.batch_size,
+            n_folds=train_config.data.n_folds,
+            current_fold=train_config.data.current_fold,
+            stratify_by_class=train_config.data.stratify_by_class,
+            stratify_by_evaluators=train_config.data.stratify_by_evaluators,
+            evaluator_bins=train_config.data.evaluator_bins,
+            min_evaluators=train_config.data.min_evaluators,
+            num_workers=dm_workers,
+            pin_memory=pin_mem,
+            prefetch_factor=prefetch,
+            shuffle_seed=train_config.data.shuffle_seed,
+            preload_patients=preload_flag,
+        )
+        datamodule.setup(stage="fit")
     
     # Model
     print("\n[2/4] Initializing model...")
     model = HMSLightningModule(
-        model_config=model_config,
+        model_config=model_config.model if 'model' in model_config else model_config,
         num_classes=6,
         learning_rate=train_config.learning_rate,
         weight_decay=train_config.weight_decay,
@@ -107,7 +195,11 @@ def main():
     )
     
     # Print model info
-    model_info = model.model.get_model_info()
+    try:
+        model_info = model.get_model_info()
+    except Exception:
+        # Fallback for older interface
+        model_info = model.model.get_model_info()
     print(f"\nModel Architecture:")
     print(f"  EEG output dim:    {model_info['eeg_output_dim']}")
     print(f"  Spec output dim:   {model_info['spec_output_dim']}")
@@ -118,12 +210,19 @@ def main():
     
     # WandB Logger
     print("\n[3/4] Setting up logging and callbacks...")
-    wandb_logger = WandbLogger(
-        project=wandb_project,
-        name=wandb_name,
-        save_dir="logs",
-        log_model=True,
-    )
+    logger_kwargs = {
+        "project": wandb_project,
+        "name": wandb_name,
+        "save_dir": "logs",
+        "log_model": True,
+        "tags": list(getattr(train_config, "wandb_tags", []) or []),
+        "group": getattr(train_config, "wandb_group", None),
+        "job_type": getattr(train_config, "wandb_job_type", None),
+        "anonymous": "allow",
+    }
+    if hasattr(train_config, "wandb_entity") and train_config.wandb_entity:
+        logger_kwargs["entity"] = train_config.wandb_entity
+    wandb_logger = WandbLogger(**logger_kwargs)
     
     # Configure WandB to log step-level metrics
     wandb_logger.experiment.define_metric("train/loss_step", step_metric="trainer/global_step")
@@ -168,20 +267,57 @@ def main():
     
     # Trainer
     print("\n[4/4] Creating trainer...")
-    
-    # Configure precision based on device
-    mixed_precision = getattr(train_config, 'mixed_precision', False)
-    device = getattr(train_config, 'device', 'auto')
-    
-    if mixed_precision and device == 'cuda':
-        precision = 16
+
+    # Determine accelerator and precision
+    if hasattr(train_config, 'hardware') and train_config.hardware is not None:
+        mixed_precision = bool(train_config.hardware.mixed_precision)
+        device = getattr(train_config.hardware, 'device', 'auto')
     else:
-        # Use 32-bit precision for MPS and CPU
+        mixed_precision = bool(getattr(train_config, 'mixed_precision', False))
+        device = getattr(train_config, 'device', 'auto')
+
+    if device == 'cuda' or (device == 'auto' and torch.cuda.is_available()):
+        accelerator = 'gpu'
+    elif device == 'mps':
+        accelerator = 'mps'
+    elif device == 'cpu':
+        accelerator = 'cpu'
+    else:
+        accelerator = 'auto'
+
+    if accelerator == 'gpu' and torch.cuda.is_available():
+        try:
+            cc = torch.cuda.get_device_capability(0)
+        except Exception:
+            cc = (0, 0)
+        bf16_supported = hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported()
+        if mixed_precision and (bf16_supported or cc[0] >= 8):
+            precision = "bf16-mixed"
+        elif mixed_precision:
+            precision = "16-mixed"
+        else:
+            precision = 32
+        # Enable cuDNN benchmark for static shapes
+        try:
+            import torch.backends.cudnn as cudnn
+            cudnn.benchmark = True
+        except Exception:
+            pass
+    else:
         precision = 32
-    
+
+    # Optional torch.compile for PyTorch 2.x
+    if getattr(train_config, "compile_model", False) and hasattr(torch, "compile") and accelerator == 'gpu':
+        try:
+            compile_mode = str(getattr(train_config, "compile_mode", "reduce-overhead"))
+            model = torch.compile(model, mode=compile_mode)
+            print(f"Enabled torch.compile with mode={compile_mode}")
+        except Exception as e:
+            print(f"torch.compile failed, continuing without compile: {e}")
+
     trainer = Trainer(
         max_epochs=train_config.num_epochs,
-        accelerator='auto',
+        accelerator=accelerator,
         devices=1,
         logger=wandb_logger,
         callbacks=callbacks,
@@ -190,6 +326,7 @@ def main():
         log_every_n_steps=10,
         val_check_interval=0.25,
         deterministic=False,
+        num_sanity_val_steps=0,
     )
     
     # Train

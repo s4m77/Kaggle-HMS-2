@@ -42,11 +42,12 @@ data:
   - 20
   - 999
   min_evaluators: 0
-  num_workers: 12
+  num_workers: 24
   pin_memory: true
   prefetch_factor: 2
   shuffle_seed: 42
   preload_patients: true
+  build_scope: train+val
 hardware:
   device: cuda
   mixed_precision: true

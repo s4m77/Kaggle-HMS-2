@@ -266,7 +266,7 @@ class HMSOnlineDataModule(LightningDataModule):
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=self.num_workers,
-            pin_memory=True,  # Enable pinned memory for faster CPU→GPU transfer
+            pin_memory=self.pin_memory,  # Configurable pinned memory
             prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
             persistent_workers=self.num_workers > 0,
             collate_fn=custom_collate_fn,
@@ -279,7 +279,7 @@ class HMSOnlineDataModule(LightningDataModule):
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
-            pin_memory=True,  # Enable pinned memory for faster CPU→GPU transfer
+            pin_memory=self.pin_memory,  # Configurable pinned memory
             prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
             persistent_workers=self.num_workers > 0,
             collate_fn=custom_collate_fn,

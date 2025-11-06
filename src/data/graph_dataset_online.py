@@ -74,7 +74,8 @@ class HMSOnlineDataset(Dataset):
         
         # Cache for raw data (to avoid repeated parquet reads)
         self._eeg_cache: Dict[int, np.ndarray] = {}
-        self._spec_cache: Dict[int, Dict[str, np.ndarray]] = {}
+        # Cache spectrogram as full DataFrame to match SpectrogramGraphBuilder API
+        self._spec_cache: Dict[int, pd.DataFrame] = {}
         
         # Determine which files to cache
         if self.cache_raw_data:
@@ -100,13 +101,8 @@ class HMSOnlineDataset(Dataset):
             spec_path = self.raw_data_dir / "train_spectrograms" / f"{spec_id}.parquet"
             if spec_path.exists():
                 spec_df = pd.read_parquet(spec_path)
-                # Convert to dict of arrays (one per region)
-                spec_data = {}
-                for region in self.spec_builder.regions:
-                    region_cols = [col for col in spec_df.columns if col.startswith(region)]
-                    if region_cols:
-                        spec_data[region] = spec_df[region_cols].values
-                self._spec_cache[spec_id] = spec_data
+                # Store full DataFrame; builder handles preprocessing/selection
+                self._spec_cache[spec_id] = spec_df
         
         print(f"  Cached {len(self._eeg_cache)} EEG and {len(self._spec_cache)} spectrogram files")
     
@@ -130,8 +126,8 @@ class HMSOnlineDataset(Dataset):
         
         return eeg_data
     
-    def _load_spectrogram(self, spec_id: int) -> Dict[str, np.ndarray]:
-        """Load raw spectrogram data (from cache or disk)."""
+    def _load_spectrogram(self, spec_id: int) -> pd.DataFrame:
+        """Load raw spectrogram DataFrame (from cache or disk)."""
         if spec_id in self._spec_cache:
             return self._spec_cache[spec_id]
         
@@ -139,18 +135,11 @@ class HMSOnlineDataset(Dataset):
         spec_path = self.raw_data_dir / "train_spectrograms" / f"{spec_id}.parquet"
         spec_df = pd.read_parquet(spec_path)
         
-        # Convert to dict of arrays
-        spec_data = {}
-        for region in self.spec_builder.regions:
-            region_cols = [col for col in spec_df.columns if col.startswith(region)]
-            if region_cols:
-                spec_data[region] = spec_df[region_cols].values
-        
         # Cache if enabled
         if self.cache_raw_data:
-            self._spec_cache[spec_id] = spec_data
+            self._spec_cache[spec_id] = spec_df
         
-        return spec_data
+        return spec_df
     
     def __getitem__(self, idx: int) -> Dict:
         """Get a single sample with on-the-fly graph generation.
@@ -186,7 +175,7 @@ class HMSOnlineDataset(Dataset):
         # Build EEG graphs on-the-fly
         eeg_graphs = self.eeg_builder.process_eeg_signal(eeg_data)
         
-        # Build spectrogram graphs on-the-fly
+        # Build spectrogram graphs on-the-fly (expects DataFrame)
         spec_graphs = self.spec_builder.process_spectrogram(spec_data)
         
         # Get target (support both class index and vote distribution)
