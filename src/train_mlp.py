@@ -17,7 +17,7 @@ from sklearn.model_selection import GroupKFold
 from torch.utils.data import DataLoader
 
 from src.data.raw_datamodule import RawEEGDataModule
-from src.models.lightning_model import HMSLightningModule
+from src.lightning_trainer.mlp_lightning_module import EEGMLPLightningModule
 
 FoldIterator = Iterator[Tuple[int, DataLoader, DataLoader, Dict[str, Sequence[str]]]]
 
@@ -175,7 +175,7 @@ def train_single_fold(
     cfg: DictConfig,
     fast_dev_run: bool,
 ) -> Optional[float]:
-    model = HMSLightningModule(cfg)
+    model = EEGMLPLightningModule(cfg)
 
     should_compile = bool(getattr(cfg.trainer, "compile", False))
     if should_compile and hasattr(torch, "compile"):
