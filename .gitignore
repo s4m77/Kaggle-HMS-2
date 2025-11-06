@@ -10,3 +10,5 @@ checkpoints/
 .DS_Store
 
 wandb/
+
+processed/

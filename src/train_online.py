@@ -156,6 +156,21 @@ def main():
             overwrite=False,
             num_workers=build_workers,
         )
+        # Quick consistency check: ensure legacy-style window counts (EEG=9, Spec=119) for first built patient
+        try:
+            sample_patient_file = next((processed_dir / f"patient_{pid}.pt" for pid in fold_meta['patient_id'].unique() if (processed_dir / f"patient_{pid}.pt").exists()), None)
+            if sample_patient_file:
+                patient_payload = torch.load(sample_patient_file, weights_only=False)
+                # Take first label entry
+                first_label_id = next(iter(patient_payload.keys()))
+                sample_entry = patient_payload[first_label_id]
+                eeg_ct = len(sample_entry['eeg_graphs']) if 'eeg_graphs' in sample_entry else -1
+                spec_ct = len(sample_entry['spec_graphs']) if 'spec_graphs' in sample_entry else -1
+                print(f"[Verification] Patient file {sample_patient_file.name}: EEG graphs={eeg_ct}, Spec graphs={spec_ct}")
+                if eeg_ct != 9 or spec_ct not in (119, 120):  # allow minor off-by-one if stride config changed
+                    print("[Warning] Graph counts differ from legacy expectations (EEG=9, Spec=119). Check graph config stride/window settings.")
+        except Exception as e:
+            print(f"[Verification] Skipped consistency check due to error: {e}")
         # Switch to processed DataModule with in-RAM preload for fast training
         # When preloading, prefer num_workers=0 to avoid shared-memory pressure
         preload_flag = True

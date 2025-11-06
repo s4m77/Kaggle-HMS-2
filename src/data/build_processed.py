@@ -19,7 +19,7 @@ import pandas as pd
 import torch
 
 from src.data.utils.eeg_process import EEGGraphBuilder, select_eeg_channels
-from src.data.utils.spectrogram_process import SpectrogramGraphBuilder
+from src.data.utils.spectrogram_process import SpectrogramGraphBuilder, filter_spectrogram_columns
 
 
 def _label_to_index(label: str) -> int:
@@ -77,10 +77,18 @@ def build_patient_file(
     spec_builder: SpectrogramGraphBuilder,
     save_dir: Path,
     overwrite: bool = False,
+    label_to_index: Optional[Dict[str, int]] = None,
 ) -> Path:
     """Build and save one patient's graphs to a torch .pt file.
 
+    Mirrors the logic in `make_graph_dataset.process_single_label`:
+      - Extract a 50s EEG window based on `eeg_label_offset_seconds` then build 9 temporal EEG graphs.
+      - Extract a 600s Spectrogram window based on `spectrogram_label_offset_seconds` then build 119 temporal Spectrogram graphs.
+    This ensures consistency between online build path and legacy preprocessing.
+
     The saved dict maps label_id -> sample dict with eeg/spec graphs and target class index.
+    Required columns in df_patient: label_id, eeg_id, spectrogram_id, expert_consensus,
+        eeg_label_offset_seconds, spectrogram_label_offset_seconds.
     """
     save_dir.mkdir(parents=True, exist_ok=True)
     out_path = save_dir / f"patient_{int(patient_id)}.pt"
@@ -94,23 +102,47 @@ def build_patient_file(
         eeg_id = int(row['eeg_id'])
         spec_id = int(row['spectrogram_id'])
 
-        # Load raw EEG
+        eeg_offset = int(row.get('eeg_label_offset_seconds', 0))
+        spec_offset = int(row.get('spectrogram_label_offset_seconds', 0))
+
+        # === Load & slice EEG (50s window) ===
         eeg_path = raw_data_dir / 'train_eegs' / f'{eeg_id}.parquet'
         eeg_df = pd.read_parquet(eeg_path)
-        eeg_np = select_eeg_channels(eeg_df, eeg_builder.channels)
-
-        # Build EEG graphs
+        # Compute indices (sampling rate assumed = eeg_builder.sampling_rate, typically 200 Hz)
+        sr = getattr(eeg_builder, 'sampling_rate', 200)
+        eeg_start = eeg_offset * sr
+        eeg_end = eeg_start + (50 * sr)
+        eeg_window_df = eeg_df.iloc[eeg_start:eeg_end]
+        eeg_np = select_eeg_channels(eeg_window_df, eeg_builder.channels)
+        if eeg_np.shape[0] != 50 * sr:
+            # Skip malformed sample (log & continue)
+            print(f"Warning: EEG window shape {eeg_np.shape} for label_id {label_id} (expected {50*sr} samples)")
+            continue
         eeg_graphs = eeg_builder.process_eeg_signal(eeg_np)
 
-        # Load raw spectrogram
+        # === Load & slice Spectrogram (600s window) ===
         spec_path = raw_data_dir / 'train_spectrograms' / f'{spec_id}.parquet'
         spec_df = pd.read_parquet(spec_path)
+        # Filter time range [spec_offset, spec_offset + 600)
+        if 'time' in spec_df.columns:
+            spec_window_df = spec_df[(spec_df['time'] >= spec_offset) & (spec_df['time'] < spec_offset + 600)]
+        else:
+            # Fallback: assume entire file corresponds to needed window if no time column
+            spec_window_df = spec_df.copy()
+        # Restrict to configured regions similar to legacy pipeline
+        try:
+            spec_window_df = filter_spectrogram_columns(spec_window_df, spec_builder.regions)
+        except Exception:
+            pass
+        if len(spec_window_df) == 0:
+            print(f"Warning: Empty spectrogram window for label_id {label_id}")
+            continue
+        spec_graphs = spec_builder.process_spectrogram(spec_window_df)
 
-        # Build spectrogram graphs
-        spec_graphs = spec_builder.process_spectrogram(spec_df)
-
-        # Target as class index (Lightning converts to one-hot for KLDiv)
-        target = _label_to_index(row.get('expert_consensus', 'Other'))
+        if label_to_index is not None:
+            target = int(label_to_index.get(str(row.get('expert_consensus', 'Other')).strip(), 5))
+        else:
+            target = _label_to_index(row.get('expert_consensus', 'Other'))
 
         result[label_id] = {
             'eeg_graphs': eeg_graphs,
@@ -132,8 +164,10 @@ def _worker_build(args: Tuple[int, List[Dict[str, Any]], str, str, bool, Optiona
     raw_dir = Path(raw_dir_str)
     out_dir = Path(out_dir_str)
     # Reconstruct builders locally to avoid pickling heavy objects
+    label_map = None
     if cfg is not None:
         eeg_b, spec_b = _make_builders_from_cfg(cfg)
+        label_map = cfg.get('label_to_index') if isinstance(cfg, dict) else None
     else:
         eeg_b = EEGGraphBuilder()
         spec_b = SpectrogramGraphBuilder()
@@ -147,6 +181,7 @@ def _worker_build(args: Tuple[int, List[Dict[str, Any]], str, str, bool, Optiona
         spec_builder=spec_b,
         save_dir=out_dir,
         overwrite=ow,
+        label_to_index=label_map,
     )
 
 def build_missing_processed(
@@ -221,7 +256,10 @@ def build_missing_processed(
             continue
         # Create small, picklable records list
         df_patient = by_patient.get_group(pid)[
-            ['label_id', 'eeg_id', 'spectrogram_id', 'expert_consensus']
+            [
+                'label_id', 'eeg_id', 'spectrogram_id', 'expert_consensus',
+                'eeg_label_offset_seconds', 'spectrogram_label_offset_seconds'
+            ]
         ].copy()
         records = df_patient.to_dict(orient='records')
         tasks.append((pid, records, str(raw_data_dir), str(processed_dir), overwrite, graph_config))

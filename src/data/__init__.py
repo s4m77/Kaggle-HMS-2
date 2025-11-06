@@ -10,6 +10,7 @@ from .utils import (
 )
 from src.data.graph_dataset import HMSDataset, collate_graphs
 from src.data.graph_datamodule import HMSDataModule
+from src.data.graph_datamodule_online import HMSOnlineDataModule
 
 __all__ = [
     'EEGGraphBuilder',
@@ -19,4 +20,5 @@ __all__ = [
     'HMSDataset',
     'collate_graphs',
     'HMSDataModule',
+    'HMSOnlineDataModule',
 ]
