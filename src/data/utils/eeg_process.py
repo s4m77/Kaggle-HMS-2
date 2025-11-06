@@ -129,7 +129,7 @@ def apply_zscore_normalization(eeg_signal: np.ndarray) -> np.ndarray:
 
 
 class EEGGraphBuilder:
-    """Build PyTorch Geometric graphs from EEG signals."""
+    """Build PyTorch Geometric graphs from EEG signals using physical electrode adjacency."""
     
     def __init__(
         self,
@@ -137,7 +137,6 @@ class EEGGraphBuilder:
         window_size: int = 10,
         stride: int = 5,
         bands: Optional[Dict[str, List[float]]] = None,
-        aec_threshold: float = 0.5,
         nperseg_factor: int = 2,
         channels: Optional[List[str]] = None,
         # Preprocessing parameters
@@ -156,7 +155,6 @@ class EEGGraphBuilder:
             window_size: Window size in seconds
             stride: Stride in seconds for sliding window
             bands: Dictionary of frequency bands {name: [low, high]}
-            aec_threshold: Minimum Amplitude Envelope Correlation for edge creation
             nperseg_factor: Factor for nperseg in Welch's method (for PSD)
             channels: List of channel names to use (excludes EKG)
             apply_bandpass: Whether to apply band-pass filter
@@ -178,7 +176,6 @@ class EEGGraphBuilder:
             'beta': [13.0, 30.0],
             'gamma': [30.0, 50.0]
         }
-        self.aec_threshold = aec_threshold
         self.nperseg = sampling_rate * nperseg_factor
         self.channels = channels
         

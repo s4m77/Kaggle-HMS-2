@@ -211,7 +211,6 @@ def process_single_label_wrapper(args):
         window_size=config_dict['eeg']['window_size'],
         stride=config_dict['eeg']['stride'],
         bands=config_dict['eeg']['bands'],
-        aec_threshold=config_dict['eeg']['aec']['threshold'],
         nperseg_factor=config_dict['eeg']['psd']['nperseg_factor'],
         channels=config_dict['eeg']['channels'],
         apply_bandpass=config_dict['eeg']['preprocessing']['bandpass_filter']['enabled'],
@@ -298,7 +297,6 @@ def process_all_data(config, n_workers=None):
         window_size=config.eeg.window_size,
         stride=config.eeg.stride,
         bands=dict(config.eeg.bands),
-        aec_threshold=config.eeg.aec.threshold,
         nperseg_factor=config.eeg.psd.nperseg_factor,
         channels=list(config.eeg.channels),
         # Preprocessing parameters

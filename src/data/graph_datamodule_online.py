@@ -122,7 +122,6 @@ class HMSOnlineDataModule(LightningDataModule):
                 window_size=eeg_cfg.window_size,
                 stride=eeg_cfg.stride,
                 bands=dict(eeg_cfg.bands),
-                aec_threshold=eeg_cfg.aec.threshold,
                 nperseg_factor=eeg_cfg.psd.nperseg_factor,
                 channels=list(eeg_cfg.channels),
                 # Preprocessing
