@@ -1,0 +1,49 @@
+# MLP Inference Configuration
+# Note: For MLP inference, you can use the same config as training (training_mlp.yaml)
+# This file is kept for reference/compatibility
+
+seed: 42
+
+data:
+  input_type: raw_eeg
+  metadata_csv: data/raw/test.csv  # Will be overridden to test.csv in predict_mlp.py
+  target_mode: votes
+  vote_keys:
+    - seizure_vote
+    - lpd_vote
+    - gpd_vote
+    - lrda_vote
+    - grda_vote
+    - other_vote
+
+  loader:
+    batch_size: 32  # Can be overridden via --batch_size
+    shuffle: false
+    num_workers: 4
+    pin_memory: true
+
+  raw_eeg:
+    base_dir: data/raw
+    split: test
+    sampling_rate: 200
+    label_window_sec: 10.0
+    context_window_sec: 50.0
+    normalize: true
+
+model:
+  architecture: eeg_mlp
+  use_spectrogram: false
+  normalize: true
+
+  preprocess:
+    pool_kernel: 4
+    pool_stride: 4
+    layernorm: true
+
+  classifier:
+    activation: relu
+    dropout: 0.3
+    layers:
+      - 256
+      - 128
+      - 6
