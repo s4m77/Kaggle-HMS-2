@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader
+import multiprocessing as mp
 from sklearn.model_selection import StratifiedGroupKFold
 
 from src.data.graph_dataset import HMSDataset, collate_graphs
@@ -63,7 +64,9 @@ class HMSDataModule(LightningDataModule):
         min_evaluators: int = 0,
         num_workers: int = 4,
         pin_memory: bool = True,
+        prefetch_factor: int = 4,
         shuffle_seed: int = 42,
+        preload_patients: bool = False,
     ) -> None:
         super().__init__()
         
@@ -78,7 +81,11 @@ class HMSDataModule(LightningDataModule):
         self.min_evaluators = min_evaluators
         self.num_workers = num_workers
         self.pin_memory = pin_memory
+        self.prefetch_factor = prefetch_factor
         self.shuffle_seed = shuffle_seed
+        self.preload_patients = preload_patients
+        # Track setup stages to avoid double-initialization when Trainer also calls setup
+        self._setup_done: set[str] = set()
         
         # Validate inputs
         assert 0 <= current_fold < n_folds, \
@@ -98,6 +105,11 @@ class HMSDataModule(LightningDataModule):
         stage : str, optional
             Either 'fit', 'validate', 'test', or 'predict'
         """
+        # Map stage to a key and make idempotent
+        stage_key = 'fit' if stage in (None, 'fit') else stage
+        if stage_key in self._setup_done:
+            return
+
         # Load metadata CSV
         self.metadata_df = pd.read_csv(self.train_csv)
         
@@ -199,17 +211,21 @@ class HMSDataModule(LightningDataModule):
                 self.metadata_df['fold'] == self.current_fold
             ].reset_index(drop=True)
             
-            self.train_dataset = HMSDataset(
-                data_dir=self.data_dir,
-                metadata_df=train_df,
-                is_train=True,
-            )
+            if self.train_dataset is None:
+                self.train_dataset = HMSDataset(
+                    data_dir=self.data_dir,
+                    metadata_df=train_df,
+                    is_train=True,
+                    preload_patients=self.preload_patients,
+                )
             
-            self.val_dataset = HMSDataset(
-                data_dir=self.data_dir,
-                metadata_df=val_df,
-                is_train=False,
-            )
+            if self.val_dataset is None:
+                self.val_dataset = HMSDataset(
+                    data_dir=self.data_dir,
+                    metadata_df=val_df,
+                    is_train=False,
+                    preload_patients=self.preload_patients,
+                )
             
             # Compute class weights from training set
             self.class_weights = self.train_dataset.get_class_weights()
@@ -239,14 +255,16 @@ class HMSDataModule(LightningDataModule):
             
             print(f"\n  Class weights: {self.class_weights.tolist()}")
             print(f"{'='*60}\n")
+
+        # Mark this stage as done
+        self._setup_done.add(stage_key)
     
     def train_dataloader(self) -> DataLoader:
         """Return training DataLoader."""
         if self.train_dataset is None:
             raise RuntimeError("Train dataset not initialized. Call setup() first.")
-        
-        return DataLoader(
-            self.train_dataset,
+
+        loader_kwargs = dict(
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=self.num_workers,
@@ -254,14 +272,22 @@ class HMSDataModule(LightningDataModule):
             collate_fn=collate_graphs,
             persistent_workers=self.num_workers > 0,
         )
-    
+        if self.num_workers > 0 and self.prefetch_factor is not None:
+            loader_kwargs["prefetch_factor"] = int(self.prefetch_factor)
+        # Use forkserver when possible to reduce FD/mmap issues
+        if self.num_workers > 0:
+            try:
+                loader_kwargs["multiprocessing_context"] = mp.get_context("forkserver")
+            except Exception:
+                pass
+        return DataLoader(self.train_dataset, **loader_kwargs)
+
     def val_dataloader(self) -> DataLoader:
         """Return validation DataLoader."""
         if self.val_dataset is None:
             raise RuntimeError("Validation dataset not initialized. Call setup() first.")
-        
-        return DataLoader(
-            self.val_dataset,
+
+        loader_kwargs = dict(
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
@@ -269,6 +295,18 @@ class HMSDataModule(LightningDataModule):
             collate_fn=collate_graphs,
             persistent_workers=self.num_workers > 0,
         )
+        if self.num_workers > 0 and self.prefetch_factor is not None:
+            loader_kwargs["prefetch_factor"] = int(self.prefetch_factor)
+        if self.num_workers > 0:
+            try:
+                loader_kwargs["multiprocessing_context"] = mp.get_context("forkserver")
+            except Exception:
+                pass
+        return DataLoader(self.val_dataset, **loader_kwargs)
+
+    def test_dataloader(self) -> DataLoader:
+        """Return test DataLoader (uses validation split in this project)."""
+        return self.val_dataloader()
     
     def get_num_classes(self) -> int:
         """Return number of classes."""

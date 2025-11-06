@@ -117,9 +117,9 @@ def test_batch_structure(datamodule):
     assert isinstance(batch['eeg_graphs'], list)
     assert len(batch['eeg_graphs']) == 9
     
-    # Check Spec graphs (should have 119 timesteps)
+    # Check Spec graphs (subsampled to 40 timesteps)
     assert isinstance(batch['spec_graphs'], list)
-    assert len(batch['spec_graphs']) == 119
+    assert len(batch['spec_graphs']) == 40
     
     # Check targets shape
     assert batch['targets'].shape[0] == 4  # batch size
