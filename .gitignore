@@ -3,6 +3,7 @@ data/
 
 .pytest_cache
 
+.venv/
 .vscode
 
 docs/
