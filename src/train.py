@@ -161,8 +161,12 @@ def train(
     
     # Initialize Lightning Module
     print("Initializing Model...")
+    # Prepare model config with use_regional_fusion at the right level
+    full_model_config = OmegaConf.to_container(model_config.model, resolve=True)
+    full_model_config['use_regional_fusion'] = model_config.get('use_regional_fusion', True)
+    
     model = lightning_module_cls(
-        model_config=model_config.model,
+        model_config=full_model_config,
         num_classes=model_config.model.num_classes,
         learning_rate=train_config.learning_rate,
         weight_decay=train_config.regularization.weight_decay,

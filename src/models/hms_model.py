@@ -8,9 +8,10 @@ import torch
 from torch import nn
 from torch_geometric.data import Batch
 
-from src.models import TemporalGraphEncoder
-from src.models import CrossModalFusion
-from src.models import MLPClassifier
+from src.models.graph_layers.temporal_encoder import TemporalGraphEncoder
+from src.models.graph_layers.fusion import CrossModalFusion
+from src.models.graph_layers.regional_fusion import RegionalCrossModalFusion
+from src.models.graph_layers.classifier import MLPClassifier
 
 
 class HMSMultiModalGNN(nn.Module):
@@ -38,6 +39,9 @@ class HMSMultiModalGNN(nn.Module):
         Configuration for classifier
     num_classes : int
         Number of output classes (default: 6)
+    use_regional_fusion : bool
+        If True, use regional cross-modal fusion (preserves spatial structure)
+        If False, use simple cross-modal fusion (collapses to single vector)
     """
     
     def __init__(
@@ -47,6 +51,7 @@ class HMSMultiModalGNN(nn.Module):
         fusion_config: Optional[dict] = None,
         classifier_config: Optional[dict] = None,
         num_classes: int = 6,
+        use_regional_fusion: bool = True,
     ) -> None:
         super().__init__()
         
@@ -55,6 +60,12 @@ class HMSMultiModalGNN(nn.Module):
         spec_config = spec_config or {}
         fusion_config = fusion_config or {}
         classifier_config = classifier_config or {}
+        
+        self.use_regional_fusion = use_regional_fusion
+        
+        # Determine number of regions for each modality
+        num_eeg_regions = eeg_config.get("num_regions", 4)
+        num_spec_regions = spec_config.get("num_regions", 4)
         
         # EEG Encoder (processes 9 temporal graphs)
         self.eeg_encoder = TemporalGraphEncoder(
@@ -72,6 +83,8 @@ class HMSMultiModalGNN(nn.Module):
             pooling_method=eeg_config.get("pooling_method", "mean"),
             channels=eeg_config.get("channels", None),
             use_hierarchical_pooling=eeg_config.get("use_hierarchical_pooling", False),
+            num_regions=num_eeg_regions,
+            return_regional_features=use_regional_fusion,
         )
         
         # Spectrogram Encoder (processes 119 temporal graphs)
@@ -90,19 +103,35 @@ class HMSMultiModalGNN(nn.Module):
             pooling_method=spec_config.get("pooling_method", "mean"),
             channels=spec_config.get("channels", None),
             use_hierarchical_pooling=spec_config.get("use_hierarchical_pooling", False),
+            num_regions=num_spec_regions,
+            return_regional_features=use_regional_fusion,
         )
         
         # Cross-Modal Fusion
         eeg_output_dim = self.eeg_encoder.output_dim
         spec_output_dim = self.spec_encoder.output_dim
         
-        self.fusion = CrossModalFusion(
-            eeg_dim=eeg_output_dim,
-            spec_dim=spec_output_dim,
-            hidden_dim=fusion_config.get("hidden_dim", 256),
-            num_heads=fusion_config.get("num_heads", 8),
-            dropout=fusion_config.get("dropout", 0.2),
-        )
+        if use_regional_fusion:
+            # Regional fusion: preserves spatial structure
+            self.fusion = RegionalCrossModalFusion(
+                eeg_dim=eeg_output_dim,
+                spec_dim=spec_output_dim,
+                num_eeg_regions=num_eeg_regions,
+                num_spec_regions=num_spec_regions,
+                hidden_dim=fusion_config.get("hidden_dim", 256),
+                num_heads=fusion_config.get("num_heads", 8),
+                dropout=fusion_config.get("dropout", 0.2),
+                use_attention_pooling=fusion_config.get("use_attention_pooling", True),
+            )
+        else:
+            # Simple fusion: collapses to single vector
+            self.fusion = CrossModalFusion(
+                eeg_dim=eeg_output_dim,
+                spec_dim=spec_output_dim,
+                hidden_dim=fusion_config.get("hidden_dim", 256),
+                num_heads=fusion_config.get("num_heads", 8),
+                dropout=fusion_config.get("dropout", 0.2),
+            )
         
         # Classifier
         fusion_output_dim = self.fusion.output_dim
@@ -185,6 +214,7 @@ class HMSMultiModalGNN(nn.Module):
             "spec_output_dim": self.spec_encoder.output_dim,
             "fusion_output_dim": self.fusion.output_dim,
             "num_classes": self.num_classes,
+            "use_regional_fusion": self.use_regional_fusion,
             "total_params": total_params,
             "trainable_params": trainable_params,
         }

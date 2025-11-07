@@ -8,7 +8,7 @@ import torch
 from torch import nn
 from torch_geometric.data import Batch
 
-from src.models import GATEncoder
+from src.models.graph_layers.gat_encoder import GATEncoder
 from src.models.graph_layers.hierarchical_pooling import HierarchicalPoolingLayer
 
 
@@ -53,6 +53,15 @@ class TemporalGraphEncoder(nn.Module):
         How to pool node embeddings after LSTM: 'mean', 'max', or 'sum'
     max_nodes : int
         Expected number of nodes per graph (for consistency)
+    channels : List[str], optional
+        List of channel names for hierarchical pooling (e.g., EEG channel names)
+    use_hierarchical_pooling : bool
+        If True, use hierarchical pooling to group channels into regions before LSTM
+    num_regions : int
+        Number of regions for hierarchical pooling (default: 4)
+    return_regional_features : bool
+        If True, return regional features (batch, num_regions, output_dim)
+        If False, return single pooled vector (batch, output_dim)
     """
 
     def __init__(
@@ -72,6 +81,8 @@ class TemporalGraphEncoder(nn.Module):
         max_nodes: int = None,
         channels: Optional[List[str]] = None,
         use_hierarchical_pooling: bool = True,
+        num_regions: int = 4,
+        return_regional_features: bool = True,
     ) -> None:
         super().__init__()
         
@@ -84,6 +95,8 @@ class TemporalGraphEncoder(nn.Module):
         self.max_nodes = max_nodes
         self.channels = channels
         self.use_hierarchical_pooling = use_hierarchical_pooling
+        self.num_regions = num_regions
+        self.return_regional_features = return_regional_features
         
         if self.pooling_method not in ("mean", "max", "sum"):
             raise ValueError(f"Unsupported pooling method: {self.pooling_method}")
@@ -99,11 +112,19 @@ class TemporalGraphEncoder(nn.Module):
             use_edge_attr=use_edge_attr,
         )
         
-        # LSTM for temporal sequence modeling on node embeddings
-        # Input: (batch_size * num_nodes, seq_len, gat_out_dim)
-        # This processes each node's temporal evolution independently across the sequence
+        # LSTM for temporal sequence modeling
+        # Input size depends on whether we use hierarchical pooling:
+        # - With hierarchical pooling: num_regions * gat_out_dim (4 * 64 = 256)
+        #   * EEG: Pools 19 channels → 4 brain regions, then flattens
+        #   * Spec: Has 4 nodes (already regional), treats as 4 regions, then flattens
+        # - Without hierarchical pooling: gat_out_dim (64)
+        if use_hierarchical_pooling:
+            lstm_input_size = num_regions * gat_out_dim  # Both EEG and Spec: flatten regions
+        else:
+            lstm_input_size = gat_out_dim  # Simple pooling case
+        
         self.lstm = nn.LSTM(
-            input_size=gat_out_dim,
+            input_size=lstm_input_size,
             hidden_size=rnn_hidden_dim,
             num_layers=rnn_num_layers,
             batch_first=True,
@@ -114,26 +135,33 @@ class TemporalGraphEncoder(nn.Module):
         # Layer normalization for stability
         self.layer_norm = nn.LayerNorm(gat_out_dim)
         
-        # Hierarchical pooling (after LSTM)
+        # Hierarchical pooling (before LSTM to create regional sequences)
         if use_hierarchical_pooling:
             self.hierarchical_pooling = HierarchicalPoolingLayer(
                 channels=channels,
-                num_regions=4,
+                num_regions=num_regions,
                 pooling_method=pooling_method,
             )
         else:
             self.hierarchical_pooling = None
         
-        # Center-focused attention on final representations
-        # If using hierarchical pooling, attention operates on regional features
-        attention_input_dim = rnn_hidden_dim * 2 if bidirectional else rnn_hidden_dim
-        self.center_attention = nn.Linear(attention_input_dim, 1)
+        # Regional attention for final output (replaces center-focused attention)
+        # This allows us to return weighted regional features instead of a single vector
+        if return_regional_features:
+            self.regional_attention = nn.Linear(rnn_hidden_dim * 2 if bidirectional else rnn_hidden_dim, 1)
+            # Learnable projection to create regional features from pooled LSTM output
+            lstm_output_dim = rnn_hidden_dim * 2 if bidirectional else rnn_hidden_dim
+            self.regional_projection = nn.Linear(lstm_output_dim, num_regions * lstm_output_dim)
+        else:
+            # Keep old center-focused attention for backward compatibility
+            self.center_attention = nn.Linear(rnn_hidden_dim * 2 if bidirectional else rnn_hidden_dim, 1)
         
         # Output dimension
-        # If hierarchical pooling is used, output is concatenated regional features
-        if use_hierarchical_pooling and channels is not None:
-            self.output_dim = (rnn_hidden_dim * 2 if bidirectional else rnn_hidden_dim) * 4  # 4 regions
+        if return_regional_features:
+            # Output will be (batch, num_regions, rnn_hidden_dim * directions)
+            self.output_dim = rnn_hidden_dim * 2 if bidirectional else rnn_hidden_dim
         else:
+            # Output will be (batch, rnn_hidden_dim * directions)
             self.output_dim = rnn_hidden_dim * 2 if bidirectional else rnn_hidden_dim
     
     def forward(
@@ -160,8 +188,12 @@ class TemporalGraphEncoder(nn.Module):
         Returns
         -------
         torch.Tensor
-            If return_sequence=False: Attention-weighted output of shape (batch_size, output_dim)
-            If return_sequence=True: Full sequence of shape (batch_size, seq_len, output_dim)
+            If return_sequence=False and return_regional_features=True:
+                Regional features of shape (batch_size, num_regions, output_dim)
+            If return_sequence=False and return_regional_features=False:
+                Attention-weighted output of shape (batch_size, output_dim)
+            If return_sequence=True:
+                Full sequence of shape (batch_size, seq_len, output_dim)
         """
         if not graphs:
             raise ValueError("graphs list cannot be empty")
@@ -256,9 +288,14 @@ class TemporalGraphEncoder(nn.Module):
             # Stack across timesteps: (batch_size, seq_len, num_regions, gat_out_dim)
             sequence = torch.stack(final_representations, dim=1)
             
-            # Reshape to 2D for LSTM: (batch_size, seq_len, num_regions * gat_out_dim)
-            bs, seq_len_actual, num_regions, feat_dim = sequence.shape
-            sequence = sequence.reshape(bs, seq_len_actual, num_regions * feat_dim)
+            # Reshape for LSTM input:
+            # Both EEG and Spec: Flatten regions → (batch, seq_len, num_regions * gat_out_dim)
+            # - EEG: 4 brain regions (Frontal, Central, Parietal, Occipital)
+            # - Spec: 4 montage regions (LL, RL, LP, RP)
+            bs, seq_len_actual, num_regions_out, feat_dim = sequence.shape
+            
+            # Flatten regions for LSTM (both branches)
+            sequence = sequence.reshape(bs, seq_len_actual, num_regions_out * feat_dim)
         else:
             # Original approach: simple mean pooling
             sequence_per_sample = []
@@ -301,22 +338,49 @@ class TemporalGraphEncoder(nn.Module):
         if return_sequence:
             return final_out  # (batch_size, seq_len, output_dim)
         else:
-            # Apply center-focused attention
-            attention_scores = self.center_attention(final_out)  # (batch_size, seq_len, 1)
-            attention_scores = attention_scores.squeeze(-1)  # (batch_size, seq_len)
-            
-            # Boost attention for center window
-            center_boost = is_center_mask.float() * 0.3
-            center_boost = center_boost.unsqueeze(0).expand(batch_size, -1)
-            attention_scores = attention_scores + center_boost
-            
-            # Apply softmax
-            attention_weights = torch.softmax(attention_scores, dim=1)  # (batch_size, seq_len)
-            
-            # Weighted sum of LSTM outputs
-            attention_weights = attention_weights.unsqueeze(-1)  # (batch_size, seq_len, 1)
-            attended_output = (final_out * attention_weights).sum(dim=1)  # (batch_size, output_dim)
-            
-            return attended_output
+            if self.return_regional_features:
+                # NEW: Return regional features instead of single pooled vector
+                # Apply attention pooling across timesteps
+                attention_scores = self.regional_attention(final_out)  # (batch_size, seq_len, 1)
+                attention_scores = attention_scores.squeeze(-1)  # (batch_size, seq_len)
+                
+                # Boost attention for center window
+                center_boost = is_center_mask.float() * 0.3
+                center_boost = center_boost.unsqueeze(0).expand(batch_size, -1)
+                attention_scores = attention_scores + center_boost
+                
+                # Apply softmax
+                attention_weights = torch.softmax(attention_scores, dim=1)  # (batch_size, seq_len)
+                
+                # Weighted sum of LSTM outputs
+                attention_weights = attention_weights.unsqueeze(-1)  # (batch_size, seq_len, 1)
+                attended_output = (final_out * attention_weights).sum(dim=1)  # (batch_size, output_dim)
+                
+                # Project to regional features
+                # attended_output: (batch, output_dim)
+                # We want: (batch, num_regions, output_dim)
+                regional_features = self.regional_projection(attended_output)  # (batch, num_regions * output_dim)
+                regional_features = regional_features.reshape(batch_size, self.num_regions, self.output_dim)
+                # regional_features: (batch, num_regions, output_dim)
+                
+                return regional_features
+            else:
+                # OLD: Apply center-focused attention to get single vector
+                attention_scores = self.center_attention(final_out)  # (batch_size, seq_len, 1)
+                attention_scores = attention_scores.squeeze(-1)  # (batch_size, seq_len)
+                
+                # Boost attention for center window
+                center_boost = is_center_mask.float() * 0.3
+                center_boost = center_boost.unsqueeze(0).expand(batch_size, -1)
+                attention_scores = attention_scores + center_boost
+                
+                # Apply softmax
+                attention_weights = torch.softmax(attention_scores, dim=1)  # (batch_size, seq_len)
+                
+                # Weighted sum of LSTM outputs
+                attention_weights = attention_weights.unsqueeze(-1)  # (batch_size, seq_len, 1)
+                attended_output = (final_out * attention_weights).sum(dim=1)  # (batch_size, output_dim)
+                
+                return attended_output
 
 __all__ = ["TemporalGraphEncoder"]
