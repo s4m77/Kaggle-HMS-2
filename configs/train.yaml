@@ -48,7 +48,6 @@ data:
   shuffle_seed: 42
   preload_patients: true
   build_scope: train+val
-  # Use many CPUs to build graphs fast (one-time per patient)
   build_workers: 32
 hardware:
   device: cuda

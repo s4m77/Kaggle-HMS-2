@@ -26,6 +26,29 @@ model:
 
     # Pooling method for graph-level features
     pooling_method: "mean" # Options: "mean", "max", "add"
+    
+    # Hierarchical pooling (after LSTM)
+    use_hierarchical_pooling: true # Pool by brain regions after temporal modeling
+    channels: # EEG channel names (19 total)
+      - Fp1
+      - F3
+      - C3
+      - P3
+      - F7
+      - T3
+      - T5
+      - O1
+      - Fz
+      - Cz
+      - Pz
+      - Fp2
+      - F4
+      - C4
+      - P4
+      - F8
+      - T4
+      - T6
+      - O2
 
   # Spectrogram Encoder Configuration
   # Processes 119 temporal spectrogram graphs (each with 4 nodes)
@@ -48,6 +71,9 @@ model:
 
     # Pooling method
     pooling_method: "mean"
+    
+    # Hierarchical pooling (spectrogram already has 4 regions)
+    use_hierarchical_pooling: true # Preserve regional structure
 
   # Cross-Modal Fusion Configuration
   # Fuses EEG (256-dim) and Spectrogram (256-dim) features

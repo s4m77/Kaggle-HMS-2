@@ -70,6 +70,8 @@ class HMSMultiModalGNN(nn.Module):
             rnn_dropout=eeg_config.get("rnn_dropout", 0.2),
             bidirectional=eeg_config.get("bidirectional", True),
             pooling_method=eeg_config.get("pooling_method", "mean"),
+            channels=eeg_config.get("channels", None),
+            use_hierarchical_pooling=eeg_config.get("use_hierarchical_pooling", False),
         )
         
         # Spectrogram Encoder (processes 119 temporal graphs)
@@ -86,6 +88,8 @@ class HMSMultiModalGNN(nn.Module):
             rnn_dropout=spec_config.get("rnn_dropout", 0.2),
             bidirectional=spec_config.get("bidirectional", True),
             pooling_method=spec_config.get("pooling_method", "mean"),
+            channels=spec_config.get("channels", None),
+            use_hierarchical_pooling=spec_config.get("use_hierarchical_pooling", False),
         )
         
         # Cross-Modal Fusion

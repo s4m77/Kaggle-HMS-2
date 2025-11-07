@@ -245,12 +245,7 @@ def collate_graphs(batch: List[Dict]) -> Dict:
         batched_graph = Batch.from_data_list(graphs_at_t)
         batched_eeg_graphs.append(batched_graph)
     
-    # Batch Spectrogram graphs: subsample timesteps globally to reduce object count
-    all_spec_steps = len(spec_sequences[0])
-    max_spec_steps = 40
-    if all_spec_steps > max_spec_steps:
-        keep_idx = np.linspace(0, all_spec_steps - 1, max_spec_steps, dtype=int)
-        spec_sequences = [[seq[i] for i in keep_idx] for seq in spec_sequences]
+    # Batch Spectrogram graphs: keep all timesteps to preserve temporal information
     num_spec_timesteps = len(spec_sequences[0])
     batched_spec_graphs = []
     for t in range(num_spec_timesteps):
