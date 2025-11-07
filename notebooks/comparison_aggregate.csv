@@ -1,0 +1,2 @@
+folds_compared,baseline_loss_mean,graph_loss_mean,delta_loss_mean,baseline_acc_mean,graph_acc_mean,delta_acc_mean
+1,1.7420014853034516,1.4259835481643677,-0.3160179371390839,0.34084699453551914,0.46087387204170227,0.12002687750618313

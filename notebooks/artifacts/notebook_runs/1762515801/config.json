@@ -1,0 +1,5 @@
+{
+  "use_soft": true,
+  "seed": 42,
+  "num_classes": 6
+}

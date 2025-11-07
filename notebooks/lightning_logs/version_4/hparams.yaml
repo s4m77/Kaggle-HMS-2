@@ -1,0 +1,80 @@
+config:
+  seed: 42
+  data:
+    input_type: raw_eeg
+    metadata_csv: /workspace/Kaggle-HMS/data/raw/train_unique.csv
+    target_mode: votes
+    vote_keys:
+    - seizure_vote
+    - lpd_vote
+    - gpd_vote
+    - lrda_vote
+    - grda_vote
+    - other_vote
+    loader:
+      batch_size: 48
+      shuffle: true
+      num_workers: 0
+      pin_memory: true
+    splits:
+      split_ratios:
+      - 0.7
+      - 0.15
+      - 0.15
+      shuffle: true
+    raw_eeg:
+      base_dir: /workspace/Kaggle-HMS/data/raw
+      split: train
+      sampling_rate: 200
+      label_window_sec: 10.0
+      context_window_sec: 50.0
+      normalize: true
+  model:
+    architecture: eeg_mlp
+    use_spectrogram: false
+    normalize: true
+    preprocess:
+      pool_kernel: 4
+      pool_stride: 4
+      layernorm: true
+    classifier:
+      activation: relu
+      dropout: 0.3
+      layers:
+      - 256
+      - 128
+      - 6
+  loss:
+    type: kl
+    pos_weight: null
+  optimizer:
+    name: adamw
+    lr: 0.0005
+    weight_decay: 0.0001
+    betas:
+    - 0.9
+    - 0.999
+  scheduler:
+    name: cosine_with_warmup
+    warmup_epochs: 10
+    min_lr: 1.0e-05
+  trainer:
+    max_epochs: 30
+    accelerator: cuda
+    devices: 1
+    precision: bf16-mixed
+    gradient_clip_val: 1.0
+    log_every_n_steps: 5
+    benchmark: true
+  logging:
+    wandb:
+      project: Graph ML
+      entity: null
+      run_name: null
+      tags: []
+  checkpointing:
+    dirpath: /workspace/Kaggle-HMS/artifacts/checkpoints
+    monitor: val/loss
+    mode: min
+    save_top_k: 3
+    save_last: true
