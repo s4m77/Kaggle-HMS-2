@@ -1,105 +1,68 @@
-from torch_geometric.data import Batch
+import torch
 from src.models.hms_model import HMSMultiModalGNN
+from torch_geometric.data import Data, Batch
 import torch.nn as nn
+from typing import List, Optional
 
-class EEGExplainerWrapper(nn.Module):
+class ExplanationWrapper(nn.Module):
     """
-    Wraps the HMSMultiModalGNN to explain the EEG modality.
-    It holds a fixed spectrogram graph and passes the perturbed
-    EEG inputs to the full model.
+    Wraps the HMSMultiModalGNN for GNNExplainer.
+    ...
     """
-    def __init__(self, model: HMSMultiModalGNN, spectrogram_batch: Batch):
+    def __init__(
+        self,
+        model: HMSMultiModalGNN,
+        eeg_graphs_sample: List[Batch],
+        spec_graphs_sample: List[Batch],
+        original_data_to_explain: Data,
+        graph_to_explain_idx: int,
+        modality: str = 'eeg',
+        use_edge_attr: bool = True
+    ):
         super().__init__()
         self.model = model
-        # Store the fixed spectrogram batch
-        # This graph will NOT be perturbed
-        self.spectrogram_batch = spectrogram_batch
+        self.eeg_graphs_sample = eeg_graphs_sample
+        self.spec_graphs_sample = spec_graphs_sample
+        self.idx = graph_to_explain_idx
+        self.modality = modality
+        self.use_edge_attr = use_edge_attr
+        self.original_data_to_explain = original_data_to_explain
 
-    def forward(self, x, edge_index, batch=None, edge_attr=None):
-        # Reconstruct the EEG graph from the perturbed inputs
-        # The Explainer will pass new (x, edge_index, etc.) here
-        eeg_batch = Batch(x=x, 
-                          edge_index=edge_index, 
-                          batch=batch)
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        This forward pass is what GNNExplainer will call.
+        """
         
-        # Add edge attributes if the model uses them
-        if edge_attr is not None:
-            eeg_batch.edge_attr = edge_attr
-        
-        # Get the fixed spectrogram graph, ensuring it's on the same device
-        spec_batch = self.spectrogram_batch.to(x.device)
+        self.model.train()
 
-        # Manually disable explanations on the spec_encoder's modules
-        # to prevent them from consuming the EEG edge_mask.
-        original_states = {}
-        spec_encoder = self.model.spec_encoder
-        for module in spec_encoder.modules():
-            if hasattr(module, "explain"):
-                original_states[module] = module.explain
-                module.explain = False  # Disable explanations
-
-        try:
-            # Call the original model
-            # The eeg_encoder will run with explain=True (default)
-            # The spec_encoder will run with explain=False
-            output = self.model(eeg_graph=eeg_batch, 
-                                spectrogram_graph=spec_batch)
-        finally:
-            # Restore original states
-            for module, state in original_states.items():
-                if module in original_states:
-                    module.explain = state
+        # Create the new perturbed Data object by cloning the original
+        perturbed_data = self.original_data_to_explain.clone()
         
-        # We only return logits, as required by the Explainer
-        return output["logits"]
-    
-class SpecExplainerWrapper(nn.Module):
-    """
-    Wraps the HMSMultiModalGNN to explain the Spectrogram modality.
-    It holds a fixed eeg graph and passes the perturbed
-    spectrogram inputs to the full model.
-    """
-    def __init__(self, model: HMSMultiModalGNN, eeg_batch: Batch):
-        super().__init__()
-        self.model = model
-        # Store the fixed eeg batch
-        # This graph will NOT be perturbed
-        self.eeg_batch = eeg_batch
-
-    def forward(self, x, edge_index, batch=None, edge_attr=None):
-        # Reconstruct the Spec graph from the perturbed inputs
-        # The Explainer will pass new (x, edge_index, etc.) here
-        spec_batch = Batch(x=x, 
-                          edge_index=edge_index, 
-                          batch=batch)
+        # Replace attributes with the perturbed ones
+        perturbed_data.x = x
+        perturbed_data.edge_index = edge_index
         
-        # Add edge attributes if the model uses them
-        if edge_attr is not None:
-            spec_batch.edge_attr = edge_attr
-        
-        # Get the fixed spectrogram graph, ensuring it's on the same device
-        eeg_batch = self.eeg_batch.to(x.device)
+        if self.use_edge_attr:
+            perturbed_data.edge_attr = edge_attr
+        else:
+            if hasattr(perturbed_data, "edge_attr"):
+                del perturbed_data.edge_attr
 
-        # Manually disable explanations on the eeg_encoder's modules
-        # to prevent them from consuming the spec edge_mask.
-        original_states = {}
-        eeg_encoder = self.model.eeg_encoder
-        for module in eeg_encoder.modules():
-            if hasattr(module, "explain"):
-                original_states[module] = module.explain
-                module.explain = False  # Disable explanations
+        # Convert it back to a Batch (for B=1)
+        perturbed_batch = Batch.from_data_list([perturbed_data])
 
-        try:
-            # Call the original model
-            # The spec_encoder will run with explain=True (default)
-            # The eeg_encoder will run with explain=False
-            output = self.model(eeg_graph=eeg_batch, 
-                                spectrogram_graph=spec_batch)
-        finally:
-            # Restore original states
-            for module, state in original_states.items():
-                if module in original_states:
-                    module.explain = state
-        
-        # Return logits, as required by the Explainer
-        return output["logits"]
+        # Re-assemble the full input sequence
+        if self.modality == 'eeg':
+            eeg_graphs = list(self.eeg_graphs_sample) 
+            eeg_graphs[self.idx] = perturbed_batch
+            spec_graphs = self.spec_graphs_sample
+        else:
+            eeg_graphs = self.eeg_graphs_sample
+            spec_graphs = list(self.spec_graphs_sample)
+            spec_graphs[self.idx] = perturbed_batch
+
+        # Call the original model with the modified input
+        logits = self.model(eeg_graphs, spec_graphs)
+
+        # GNNExplainer's 'raw' return_type expects logits
+        return logits

@@ -74,7 +74,7 @@ class HMSMultiModalGNN(nn.Module):
         
         # Spectrogram Encoder (processes 119 temporal graphs)
         self.spec_encoder = TemporalGraphEncoder(
-            in_channels=spec_config.get("in_channels", 5),
+            in_channels=spec_config.get("in_channels", 4),
             gat_hidden_dim=spec_config.get("gat_hidden_dim", 64),
             gat_out_dim=spec_config.get("gat_out_dim", 64),
             gat_num_layers=spec_config.get("gat_num_layers", 2),
