@@ -19,7 +19,7 @@ model:
     gat_num_layers: 2
     gat_heads: 4 # Multi-head attention
     gat_dropout: 0.3
-    use_edge_attr: false # Use coherence as edge weights
+    use_edge_attr: true # Use coherence as edge weights
 
     # BiLSTM parameters
     rnn_hidden_dim: 128
@@ -33,6 +33,7 @@ model:
     # Hierarchical pooling (BEFORE LSTM for regional temporal modeling)
     use_hierarchical_pooling: true # Pool by brain regions before temporal modeling
     num_regions: 4 # Number of clinical brain regions (Frontal, Central, Parietal, Occipital)
+    return_regional_features: true # CRITICAL: Return regional features for regional fusion
     channels: # EEG channel names (19 total)
       - Fp1
       - F3
@@ -79,6 +80,12 @@ model:
     # Hierarchical pooling (spectrogram already has 4 regions: LL, RL, LP, RP)
     use_hierarchical_pooling: true # Preserve regional structure
     num_regions: 4 # Number of spectrogram regions (LL, RL, LP, RP)
+    return_regional_features: true # CRITICAL: Return regional features for regional fusion
+    channels: # Spectrogram channel names (4 regions)
+      - LL  # Left-Left
+      - RL  # Right-Left
+      - LP  # Left-Parietal
+      - RP  # Right-Parietal
 
   # Cross-Modal Fusion Configuration
   # Fuses EEG (256-dim per region) and Spectrogram (256-dim per region) features
