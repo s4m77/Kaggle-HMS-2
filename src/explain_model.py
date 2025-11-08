@@ -2,6 +2,7 @@ import argparse
 import torch
 from torch_geometric.data import Batch
 from torch_geometric.explain import Explainer, GNNExplainer
+from src.lightning_trainer.graph_lightning_module import HMSLightningModule
 from src.models.hms_model import HMSMultiModalGNN
 from typing import List, Optional
 from src.models.explainer_wrappers import ExplanationWrapper
@@ -91,36 +92,9 @@ def run_explanation(
     - graph_to_explain_idx: Integer index or None (for all)
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    # Instantiate your full model
-    print("Loading model...")
-    model_config = {
-        "eeg_config": {"use_edge_attr": True},
-        "spec_config": {"use_edge_attr": False}
-    }
-    model = HMSMultiModalGNN(**model_config)
-    
-    # Load the saved weights
-    print("Loading checkpoint...")
-    checkpoint = torch.load(model_path, map_location=device)
-    state_dict = checkpoint["state_dict"]
-    
-    clean_state_dict = {}
-    prefix_to_strip = "model."
-    
-    for k, v in state_dict.items():
-        if k.startswith(prefix_to_strip): 
-            clean_state_dict[k[len(prefix_to_strip):]] = v
-        else:
-            clean_state_dict[k] = v
 
-    try:
-        model.load_state_dict(clean_state_dict)
-        print("Model weights loaded successfully.")
-    except RuntimeError as e:
-        print(f"Error loading state_dict: {e}")
-        return
-        
+    model = HMSLightningModule.load_from_checkpoint(model_path)
+    model_config = model.hparams['model_config']
     model.to(device)
     model.eval()
 
@@ -128,6 +102,7 @@ def run_explanation(
     print(f"Loading data sample from {data_path}...")
     try:
         data_dict = torch.load(data_path, map_location='cpu')
+        print(data_dict)
         sample_id = list(data_dict.keys())[0]
         sample_data = data_dict[sample_id]
         
@@ -160,7 +135,7 @@ def run_explanation(
     
     # Loop 1: Explain EEG Graphs
     if modality_to_explain in [None, 'eeg']:
-        eeg_edge_attr_bool = model_config["eeg_config"].get("use_edge_attr", True)
+        eeg_edge_attr_bool = model_config["eeg_encoder"].get("use_edge_attr", True)
         num_eeg_graphs = len(eeg_graphs_sample)
         
         # Determine which indices to run
@@ -178,7 +153,7 @@ def run_explanation(
                 
             print(f"\n--- Explaining EEG Graph {i} ---")
             explain_single_graph(
-                model=model,
+                model=model.model,
                 eeg_graphs_sample=eeg_graphs_sample,
                 spec_graphs_sample=spec_graphs_sample,
                 modality='eeg',
@@ -189,7 +164,7 @@ def run_explanation(
 
     # Loop 2: Explain Spectrogram Graphs
     if modality_to_explain in [None, 'spec']:
-        spec_edge_attr_bool = model_config["spec_config"].get("use_edge_attr", False)
+        spec_edge_attr_bool = model_config["spec_encoder"].get("use_edge_attr", False)
         num_spec_graphs = len(spec_graphs_sample)
         
         # Determine which indices to run
@@ -207,7 +182,7 @@ def run_explanation(
 
             print(f"\n--- Explaining Spectrogram Graph {i} ---")
             explain_single_graph(
-                model=model,
+                model=model.model,
                 eeg_graphs_sample=eeg_graphs_sample,
                 spec_graphs_sample=spec_graphs_sample,
                 modality='spec',
