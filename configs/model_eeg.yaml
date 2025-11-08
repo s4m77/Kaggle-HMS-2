@@ -2,23 +2,59 @@
 
 model_type: "eeg_only"
 
-model:
-  num_classes: 6
+# Regional Fusion Configuration (kept to mirror multi-modal setup)
+use_regional_fusion: true
 
+model:
+  num_classes: 6 # Seizure, LPD, GPD, LRDA, GRDA, Other
+
+  # EEG Encoder Configuration (identical to multi-modal branch)
   eeg_encoder:
-    in_channels: 5
+    in_channels: 5 # Node features: [delta, theta, alpha, beta, gamma]
+
+    # GAT parameters
     gat_hidden_dim: 64
     gat_out_dim: 64
     gat_num_layers: 2
-    gat_heads: 4
+    gat_heads: 4 # Multi-head attention
     gat_dropout: 0.3
-    use_edge_attr: true
+    use_edge_attr: true # Use coherence as edge weights
+
+    # BiLSTM parameters
     rnn_hidden_dim: 128
     rnn_num_layers: 2
     rnn_dropout: 0.2
-    bidirectional: true
-    pooling_method: "mean"
+    bidirectional: true # Output dim will be 256 (128 * 2)
 
+    # Pooling method for graph-level features
+    pooling_method: "mean" # Options: "mean", "max", "add"
+    
+    # Hierarchical pooling (BEFORE LSTM for regional modeling)
+    use_hierarchical_pooling: true # Pool by brain regions before temporal modeling
+    num_regions: 4 # Number of clinical brain regions (Frontal, Central, Parietal, Occipital)
+    return_regional_features: true # Preserve regional structure for classifier
+    channels: # EEG channel names (19 total)
+      - Fp1
+      - F3
+      - C3
+      - P3
+      - F7
+      - T3
+      - T5
+      - O1
+      - Fz
+      - Cz
+      - Pz
+      - Fp2
+      - F4
+      - C4
+      - P4
+      - F8
+      - T4
+      - T6
+      - O2
+
+  # Classifier Configuration (matches multi-modal classifier)
   classifier:
     hidden_dims: [256, 128]
     dropout: 0.3
