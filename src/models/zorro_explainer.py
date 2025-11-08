@@ -191,6 +191,7 @@ class ZORROExplainer:
         top_k: int = 10,
         n_samples: int = 5,
         pbar: bool = True,
+        other_modality_graphs: Optional[List[Batch]] = None,
     ) -> ZORROExplanation:
         """Explain prediction for a single sample and modality.
         
@@ -208,6 +209,9 @@ class ZORROExplainer:
             Number of perturbation samples for Monte Carlo
         pbar : bool
             Whether to show progress bar
+        other_modality_graphs : Optional[List[Batch]]
+            Graphs for the other modality (e.g., spec graphs if explaining EEG).
+            If not provided, dummy graphs will be created.
         
         Returns
         -------
@@ -218,15 +222,22 @@ class ZORROExplainer:
             # Get original prediction
             if modality == "eeg":
                 eeg_graphs = graphs
-                # Need to get spec graphs from model - use dummy for now
-                spec_graphs = self._create_dummy_graphs(
-                    graphs, num_graphs=119, num_nodes_per_graph=9
-                )
+                if other_modality_graphs is not None:
+                    spec_graphs = other_modality_graphs
+                else:
+                    # Create dummy spec graphs - need to match spec feature dimension (4)
+                    spec_graphs = self._create_dummy_graphs(
+                        graphs, num_graphs=119, num_nodes_per_graph=9, num_features=4
+                    )
             else:  # spec
                 spec_graphs = graphs
-                eeg_graphs = self._create_dummy_graphs(
-                    graphs, num_graphs=9, num_nodes_per_graph=9
-                )
+                if other_modality_graphs is not None:
+                    eeg_graphs = other_modality_graphs
+                else:
+                    # Create dummy EEG graphs - need to match EEG feature dimension (5)
+                    eeg_graphs = self._create_dummy_graphs(
+                        graphs, num_graphs=9, num_nodes_per_graph=9, num_features=5
+                    )
             
             # Get original output
             with torch.no_grad():
@@ -451,8 +462,20 @@ class ZORROExplainer:
         sample_graphs: List[Batch],
         num_graphs: int,
         num_nodes_per_graph: int,
+        num_features: Optional[int] = None,
     ) -> List[Batch]:
         """Create dummy graphs to match model input expectations.
+        
+        Parameters
+        ----------
+        sample_graphs : List[Batch]
+            Sample graphs to use as reference
+        num_graphs : int
+            Number of dummy graphs to create
+        num_nodes_per_graph : int
+            Nodes per graph
+        num_features : Optional[int]
+            Number of features per node. If None, uses sample_graphs[0].x.shape[1]
         
         Returns
         -------
@@ -461,18 +484,33 @@ class ZORROExplainer:
         """
         dummy_graphs = []
         batch_size = sample_graphs[0].num_graphs
+        total_nodes = batch_size * num_nodes_per_graph
+        
+        if num_features is None:
+            num_features = sample_graphs[0].x.shape[1]
         
         for _ in range(num_graphs):
             # Create dummy graph with random features
             dummy_x = torch.randn(
-                batch_size * num_nodes_per_graph,
-                sample_graphs[0].x.shape[1],
+                total_nodes,
+                num_features,
                 device=self.device,
             )
             
+            # Create edge_index (self-loops for all nodes)
+            dummy_edge_index = torch.arange(total_nodes, device=self.device).unsqueeze(0)
+            dummy_edge_index = torch.cat([dummy_edge_index, dummy_edge_index], dim=0)
+            
+            # Create is_center mask (mark first node of each batch as center)
+            dummy_is_center = torch.zeros(total_nodes, dtype=torch.bool, device=self.device)
+            for i in range(batch_size):
+                dummy_is_center[i * num_nodes_per_graph] = True
+            
             dummy_batch = Batch(
                 x=dummy_x,
-                batch=torch.arange(batch_size).repeat_interleave(num_nodes_per_graph),
+                edge_index=dummy_edge_index,
+                batch=torch.arange(batch_size, device=self.device).repeat_interleave(num_nodes_per_graph),
+                is_center=dummy_is_center,
             )
             
             dummy_graphs.append(dummy_batch)
