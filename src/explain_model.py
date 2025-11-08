@@ -104,11 +104,7 @@ def run_explanation(
     print(f"Device: {device}")
     
     try:
-        lightning_module = HMSLightningModule.load_from_checkpoint(
-            model_path,
-            map_location=device,
-            strict=False  # Allow loading with missing or extra keys
-        )
+        lightning_module = HMSLightningModule.load_from_checkpoint(model_path)
         print("Lightning module loaded successfully.")
         
         # Extract the underlying model
