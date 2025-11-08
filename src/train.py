@@ -325,11 +325,12 @@ def train(
 
     # Smoke test limits for super-fast runs
     if getattr(train_config, "smoke_test", False):
+        smoke_batches = getattr(train_config, "smoke_test_batches", 2)
         trainer_kwargs.update({
             "max_epochs": 1,
-            "limit_train_batches": 2,
-            "limit_val_batches": 2,
-            "limit_test_batches": 2,
+            "limit_train_batches": smoke_batches,
+            "limit_val_batches": smoke_batches,
+            "limit_test_batches": smoke_batches,
             "num_sanity_val_steps": 0,
             "log_every_n_steps": 1,
         })

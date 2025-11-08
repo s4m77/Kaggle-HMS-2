@@ -57,7 +57,7 @@ model:
   # Spectrogram Encoder Configuration
   # Processes 119 temporal spectrogram graphs (each with 4 nodes)
   spec_encoder:
-    in_channels: 4 # Node features: [delta, theta, alpha, beta] (gamma dropped - always 0)
+    in_channels: 4 # Node features: [delta, theta, alpha, beta] (spectrograms only go to ~20Hz)
 
     # GAT parameters
     gat_hidden_dim: 64

@@ -1,0 +1,56 @@
+model_config: configs/model.yaml
+batch_size: 16
+num_epochs: 1
+learning_rate: 0.0003
+weight_decay: 0.0001
+wandb_project: hms-brain-activity-KL
+wandb_name: smoke-test
+wandb_tags:
+- smoke-test
+wandb_group: testing
+wandb_job_type: smoke-test
+scheduler:
+  type: ReduceLROnPlateau
+  patience: 5
+  factor: 0.5
+  min_lr: 1.0e-05
+early_stopping:
+  patience: 10
+  monitor: val/loss_epoch
+  mode: min
+use_class_weights: false
+loss: KLDivLoss
+regularization:
+  weight_decay: 0.0001
+  graph_laplacian_lambda: 0.0
+  edge_weight_penalty: 0.0
+data:
+  data_dir: data/processed
+  train_csv: data/raw/train_unique.csv
+  n_folds: 2
+  current_fold: 0
+  stratify_by_class: false
+  stratify_by_evaluators: false
+  evaluator_bins:
+  - 0
+  - 5
+  - 10
+  - 15
+  - 20
+  - 999
+  min_evaluators: 0
+  num_workers: 4
+  pin_memory: true
+  prefetch_factor: 2
+  shuffle_seed: 42
+  preload_patients: false
+  build_scope: train+val
+  build_workers: 4
+hardware:
+  device: mps
+  mixed_precision: true
+device: mps
+mixed_precision: true
+compile_model: false
+smoke_test: true
+smoke_test_batches: 10
