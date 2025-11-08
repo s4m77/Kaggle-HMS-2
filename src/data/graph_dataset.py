@@ -133,7 +133,8 @@ class HMSDataset(Dataset):
         sample = {
             'eeg_graphs': eeg_graphs,
             'spec_graphs': spec_graphs,
-            'target': sample_data['target'],
+            'target': sample_data['target'],  # Shape: (6,) vote distribution
+            'consensus_label': sample_data.get('consensus_label', -1),  # Integer label for metrics
             'patient_id': patient_id,
             'label_id': label_id,
         }
@@ -231,7 +232,8 @@ def collate_graphs(batch: List[Dict]) -> Dict:
     # Extract components
     eeg_sequences = [sample['eeg_graphs'] for sample in batch]  # List[List[9 graphs]]
     spec_sequences = [sample['spec_graphs'] for sample in batch]  # List[List[119 graphs]]
-    targets = torch.tensor([sample['target'] for sample in batch], dtype=torch.long)
+    targets = torch.stack([sample['target'] for sample in batch])  # Shape: (batch_size, 6)
+    consensus_labels = torch.tensor([sample.get('consensus_label', -1) for sample in batch], dtype=torch.long)
     patient_ids = [sample['patient_id'] for sample in batch]
     label_ids = [sample['label_id'] for sample in batch]
     
@@ -260,7 +262,8 @@ def collate_graphs(batch: List[Dict]) -> Dict:
     return {
         'eeg_graphs': batched_eeg_graphs,  # List[9] of Batch objects
         'spec_graphs': batched_spec_graphs,  # List[119] of Batch objects (with 4 features each)
-        'targets': targets,  # (batch_size,)
+        'targets': targets,  # (batch_size, 6) - vote probability distributions
+        'consensus_labels': consensus_labels,  # (batch_size,) - integer labels for metrics
         'patient_ids': patient_ids,
         'label_ids': label_ids,
     }
