@@ -7,8 +7,9 @@ data/
 logs/
 __pycache__/
 !src/data
-
+<<<<<<< HEAD
 condaenv.*.requirements.txt
+=======
 
 condaenv.7eaepzbl.requirements.txt
 
@@ -16,3 +17,4 @@ checkpoints/
 src/__pycache__/__init__.cpython-311.pyc
 tests/__pycache__/test_pipeline.cpython-311-pytest-8.4.2.pyc
 tests/__pycache__/test_resume.cpython-311-pytest-8.4.2.pyc
+>>>>>>> 3534cba (refactor: enhance data loading and CUDA checks, update training configuration)

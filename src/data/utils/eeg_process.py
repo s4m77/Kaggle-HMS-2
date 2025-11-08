@@ -1,6 +1,6 @@
 """
 EEG preprocessing utilities for graph construction.
-Extracts band power features and coherence-based edges from raw EEG signals.
+Extracts PSD (Power Spectral Density) features and builds graphs based on physical electrode adjacency.
 Includes signal preprocessing: band-pass filter, notch filter, and normalization.
 """
 
@@ -8,9 +8,34 @@ import numpy as np
 import torch
 import warnings
 from scipy import signal
-from scipy.signal import coherence, butter, filtfilt, iirnotch
+from scipy.signal import butter, filtfilt, iirnotch
 from typing import List, Tuple, Dict, Optional
 from torch_geometric.data import Data
+
+
+# Physical electrode adjacency based on 10-20 system
+# Each electrode is connected to its spatial neighbors on the scalp
+ELECTRODE_ADJACENCY = {
+    'Fp1': ['F7', 'F3', 'Fp2'],
+    'Fp2': ['Fp1', 'F4', 'F8'],
+    'F7': ['Fp1', 'F3', 'T3'],
+    'F3': ['Fp1', 'F7', 'Fz', 'C3'],
+    'Fz': ['F3', 'F4', 'Cz'],
+    'F4': ['Fp2', 'Fz', 'F8', 'C4'],
+    'F8': ['Fp2', 'F4', 'T4'],
+    'T3': ['F7', 'C3', 'T5'],
+    'C3': ['F3', 'T3', 'Cz', 'P3'],
+    'Cz': ['Fz', 'C3', 'C4', 'Pz'],
+    'C4': ['F4', 'Cz', 'T4', 'P4'],
+    'T4': ['F8', 'C4', 'T6'],
+    'T5': ['T3', 'P3', 'O1'],
+    'P3': ['C3', 'T5', 'Pz', 'O1'],
+    'Pz': ['Cz', 'P3', 'P4'],
+    'P4': ['C4', 'Pz', 'T6', 'O2'],
+    'T6': ['T4', 'P4', 'O2'],
+    'O1': ['T5', 'P3', 'O2'],
+    'O2': ['P4', 'T6', 'O1'],
+}
 
 
 def apply_bandpass_filter(
@@ -104,7 +129,7 @@ def apply_zscore_normalization(eeg_signal: np.ndarray) -> np.ndarray:
 
 
 class EEGGraphBuilder:
-    """Build PyTorch Geometric graphs from EEG signals."""
+    """Build PyTorch Geometric graphs from EEG signals using physical electrode adjacency."""
     
     def __init__(
         self,
@@ -112,7 +137,6 @@ class EEGGraphBuilder:
         window_size: int = 10,
         stride: int = 5,
         bands: Optional[Dict[str, List[float]]] = None,
-        coherence_threshold: float = 0.5,
         nperseg_factor: int = 2,
         channels: Optional[List[str]] = None,
         # Preprocessing parameters
@@ -131,8 +155,7 @@ class EEGGraphBuilder:
             window_size: Window size in seconds
             stride: Stride in seconds for sliding window
             bands: Dictionary of frequency bands {name: [low, high]}
-            coherence_threshold: Minimum coherence for edge creation
-            nperseg_factor: Factor for nperseg in Welch's method
+            nperseg_factor: Factor for nperseg in Welch's method (for PSD)
             channels: List of channel names to use (excludes EKG)
             apply_bandpass: Whether to apply band-pass filter
             bandpass_low: Low cutoff for band-pass filter (Hz)
@@ -153,7 +176,6 @@ class EEGGraphBuilder:
             'beta': [13.0, 30.0],
             'gamma': [30.0, 50.0]
         }
-        self.coherence_threshold = coherence_threshold
         self.nperseg = sampling_rate * nperseg_factor
         self.channels = channels
         
@@ -229,19 +251,19 @@ class EEGGraphBuilder:
         
         return windows
     
-    def compute_band_power(self, eeg_window: np.ndarray) -> np.ndarray:
+    def compute_psd(self, eeg_window: np.ndarray) -> np.ndarray:
         """
-        Compute power in each frequency band for each channel.
+        Compute Power Spectral Density for each channel across frequency bands.
         
         Args:
             eeg_window: (n_samples, n_channels) array
         
         Returns:
-            (n_channels, n_bands) array of band powers
+            (n_channels, n_bands) array of PSD values
         """
         n_channels = eeg_window.shape[1]
         n_bands = len(self.bands)
-        powers = np.zeros((n_channels, n_bands))
+        psd_features = np.zeros((n_channels, n_bands))
         
         for ch_idx in range(n_channels):
             # Compute power spectral density using Welch's method
@@ -251,77 +273,60 @@ class EEGGraphBuilder:
                 nperseg=min(self.nperseg, len(eeg_window[:, ch_idx]))
             )
             
-            # Compute power in each band
+            # Compute average PSD in each frequency band
             for band_idx, (band_name, (low, high)) in enumerate(self.bands.items()):
                 # Find frequencies in this band
                 idx_band = np.logical_and(freqs >= low, freqs <= high)
                 
                 if np.any(idx_band):
-                    # Integrate power using trapezoidal rule
-                    power = np.trapz(psd[idx_band], freqs[idx_band])
-                    powers[ch_idx, band_idx] = power
+                    # Average PSD in this band (use mean instead of integral for normalization)
+                    avg_psd = np.mean(psd[idx_band])
+                    psd_features[ch_idx, band_idx] = avg_psd
                 else:
-                    powers[ch_idx, band_idx] = 0.0
+                    psd_features[ch_idx, band_idx] = 0.0
         
-        return powers
+        return psd_features
     
-    def compute_coherence_matrix(self, eeg_window: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def compute_physical_adjacency_edges(self) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Compute coherence between all channel pairs.
-        
-        Args:
-            eeg_window: (n_samples, n_channels) array
+        Create edges based on physical electrode adjacency on the scalp.
+        Uses the 10-20 system spatial layout - electrodes are connected if they're neighbors.
         
         Returns:
             edge_index: (2, n_edges) array
-            edge_attr: (n_edges, 1) array of coherence values
+            edge_attr: (n_edges, 1) array of ones (unweighted edges)
         """
-        n_channels = eeg_window.shape[1]
-        edges = []
-        weights = []
+        if self.channels is None:
+            raise ValueError("Channels must be specified to use physical adjacency")
         
-        # Compute coherence for all channel pairs
-        for i in range(n_channels):
-            for j in range(i + 1, n_channels):
-                # Skip if either channel has near-zero variance (flat-line)
-                if np.std(eeg_window[:, i]) < 1e-10 or np.std(eeg_window[:, j]) < 1e-10:
+        # Create channel name to index mapping
+        channel_to_idx = {ch: idx for idx, ch in enumerate(self.channels)}
+        
+        edges = []
+        
+        # Build edges based on physical adjacency
+        for src_ch, neighbors in ELECTRODE_ADJACENCY.items():
+            if src_ch not in channel_to_idx:
+                continue
+                
+            src_idx = channel_to_idx[src_ch]
+            
+            for tgt_ch in neighbors:
+                if tgt_ch not in channel_to_idx:
                     continue
+                    
+                tgt_idx = channel_to_idx[tgt_ch]
                 
-                # Compute coherence between channels i and j
-                # Suppress divide-by-zero warnings from scipy
-                with warnings.catch_warnings():
-                    warnings.filterwarnings('ignore', category=RuntimeWarning, 
-                                          message='invalid value encountered in divide')
-                    freqs, coh = coherence(
-                        eeg_window[:, i],
-                        eeg_window[:, j],
-                        fs=self.sampling_rate,
-                        nperseg=min(self.nperseg, len(eeg_window[:, i]))
-                    )
-                
-                # Check for NaN values in coherence
-                if np.any(np.isnan(coh)):
-                    continue
-                
-                # Average coherence across all frequencies
-                avg_coh = np.mean(coh)
-                
-                # Add edge if coherence exceeds threshold and is valid
-                if avg_coh > self.coherence_threshold and not np.isnan(avg_coh):
-                    # Add both directions (undirected graph)
-                    edges.append([i, j])
-                    edges.append([j, i])
-                    weights.append(avg_coh)
-                    weights.append(avg_coh)
+                # Add edge (will be bidirectional since adjacency is symmetric)
+                edges.append([src_idx, tgt_idx])
+        
+        if not edges:
+            # No edges found - return empty arrays
+            return np.zeros((2, 0), dtype=np.int64), np.zeros((0, 1), dtype=np.float32)
         
         # Convert to arrays
-        if edges:
-            edge_index = np.array(edges, dtype=np.int64).T  # (2, n_edges)
-            edge_attr = np.array(weights, dtype=np.float32).reshape(-1, 1)  # (n_edges, 1)
-        else:
-            # No edges above threshold - create empty arrays
-            edge_index = np.zeros((2, 0), dtype=np.int64)
-            edge_attr = np.zeros((0, 1), dtype=np.float32)
+        edge_index = np.array(edges, dtype=np.int64).T  # (2, n_edges)
+        edge_attr = np.ones((len(edges), 1), dtype=np.float32)  # Unweighted edges
         
         return edge_index, edge_attr
     
@@ -335,14 +340,14 @@ class EEGGraphBuilder:
             is_center: Whether this window contains the labeled region
         
         Returns:
-            PyG Data object with node features, edges, and temporal position
+            PyG Data object with node features (PSD), edges (physical adjacency), and temporal position
         """
-        # Compute node features (band powers)
-        band_power = self.compute_band_power(eeg_window)  # (n_channels, n_bands)
-        x = torch.tensor(band_power, dtype=torch.float)
+        # Compute node features: Power Spectral Density
+        psd_features = self.compute_psd(eeg_window)  # (n_channels, n_bands)
+        x = torch.tensor(psd_features, dtype=torch.float)
         
-        # Compute edges (coherence-based)
-        edge_index, edge_attr = self.compute_coherence_matrix(eeg_window)
+        # Compute edges: Physical electrode adjacency (same for all windows)
+        edge_index, edge_attr = self.compute_physical_adjacency_edges()
         edge_index = torch.tensor(edge_index, dtype=torch.long)
         edge_attr = torch.tensor(edge_attr, dtype=torch.float)
         

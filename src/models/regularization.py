@@ -21,6 +21,8 @@ def graph_laplacian_regularization(
     
     The regularization term is:
         L_smooth = (1/|E|) * Σ_(i,j)∈E ||x_i - x_j||²
+    With normalize=True, we further divide by the feature dimension so the
+    magnitude is roughly independent of the number of features.
     
     Where E is the set of edges and x_i, x_j are node features.
     
@@ -61,8 +63,10 @@ def graph_laplacian_regularization(
     smoothness_loss = (diff ** 2).sum()
     
     if normalize:
-        # Normalize by number of edges
-        smoothness_loss = smoothness_loss / edge_index.size(1)
+        # Normalize by number of edges and feature dimension to keep scale stable
+        num_edges = max(int(edge_index.size(1)), 1)
+        num_feats = max(int(x.size(1)) if x.dim() > 1 else 1, 1)
+        smoothness_loss = smoothness_loss / (num_edges * num_feats)
     
     return smoothness_loss
 

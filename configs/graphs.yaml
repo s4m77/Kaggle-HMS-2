@@ -30,7 +30,7 @@ eeg:
   window_size: 10 # seconds - matches labeled region duration
   stride: 5 # seconds - 50% overlap
 
-  # Frequency bands for feature extraction
+  # Frequency bands for feature extraction (PSD computation)
   bands:
     delta: [0.5, 4.0]
     theta: [4.0, 8.0]
@@ -38,11 +38,16 @@ eeg:
     beta: [13.0, 30.0]
     gamma: [30.0, 50.0]
 
-  # Coherence-based edge construction
-  coherence:
-    threshold: 0.5 # Minimum coherence to create edge
-    nperseg_factor: 2 # nperseg = sampling_rate * nperseg_factor
-    method: "welch" # Method for coherence computation
+  # Amplitude Envelope Correlation (AEC) for edge construction
+  aec:
+    threshold: 0.7 # Minimum AEC to create edge (correlation of amplitude envelopes)
+    # AEC uses Hilbert transform to extract amplitude envelopes
+    # Then computes Pearson correlation between envelopes
+
+  # PSD computation parameters
+  psd:
+    nperseg_factor: 2 # nperseg = sampling_rate * nperseg_factor (for Welch's method)
+    method: "welch" # Method for PSD computation
 
   # Channel names (exclude EKG)
   channels:
@@ -73,8 +78,8 @@ spectrogram:
   # Spectrogram preprocessing (applied before feature extraction)
   preprocessing:
     enabled: true
-    clip_min: 1.0e-7 # Minimum value for clipping
-    clip_max: 1.0e-4 # Maximum value for clipping
+    clip_min: 1.0e-2 # Minimum value for clipping (floor for log stability)
+    clip_max: 1.0e+6 # Maximum value for clipping (ceiling for outliers)
     apply_log: true # Take logarithm after clipping
     normalize: true # Normalize to mean=0, std=1
 
@@ -90,12 +95,12 @@ spectrogram:
     - RP # Right Parasagittal
 
   # Frequency bands for aggregation
+  # Note: Spectrogram data only goes to ~20 Hz, adjusted bands accordingly
   bands:
     delta: [0.5, 4.0]
     theta: [4.0, 8.0]
     alpha: [8.0, 13.0]
-    beta: [13.0, 20.0]
-    gamma: [20.0, 30.0]
+    beta: [13.0, 20.0]  # Adjusted upper bound to match data (was 30.0)
 
   # Aggregation method for frequency bins
   aggregation: "mean" # or 'max'

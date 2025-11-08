@@ -74,6 +74,7 @@ class HMSLightningModule(LightningModule):
             fusion_config=model_config.get('fusion'),
             classifier_config=model_config.get('classifier'),
             num_classes=num_classes,
+            use_regional_fusion=model_config.get('use_regional_fusion', True),
         )
         
         self.num_classes = num_classes
