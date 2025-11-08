@@ -37,7 +37,7 @@ DEFAULT_MODEL_TYPE = "multi_modal"
 def train(
     train_config_path: str = "configs/train.yaml",
     model_config_path: str | None = None,
-    wandb_project: str = "hms-brain-activity",
+    wandb_project: str = "hms-brain-activity-Final",
     wandb_name: str | None = None,
     resume_from_checkpoint: str | None = None,
 ):

@@ -4,7 +4,7 @@ num_epochs: 100
 learning_rate: 0.0003
 weight_decay: 0.0001
 wandb_project: hms-brain-activity-KL
-wandb_name: h200-fold0
+wandb_name: sam-rtx-fold0
 wandb_tags:
 - h200
 - bf16
