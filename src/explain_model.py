@@ -1,10 +1,17 @@
 import argparse
+import sys
+from pathlib import Path
 import torch
 from torch_geometric.data import Batch
 from torch_geometric.explain import Explainer, GNNExplainer
-from src.models.hms_model import HMSMultiModalGNN
 from typing import List, Optional
+
+# Add parent directory to path to allow imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from src.models.hms_model import HMSMultiModalGNN
 from src.models.explainer_wrappers import ExplanationWrapper
+from src.lightning_trainer.graph_lightning_module import HMSLightningModule
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run GNNExplainer on the HMSMultiModalGNN model.")
@@ -92,37 +99,65 @@ def run_explanation(
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # Instantiate your full model
-    print("Loading model...")
-    model_config = {
-        "eeg_config": {"use_edge_attr": True},
-        "spec_config": {"use_edge_attr": False}
-    }
-    model = HMSMultiModalGNN(**model_config)
+    # Load the Lightning module from checkpoint
+    print(f"Loading checkpoint from: {model_path}")
+    print(f"Device: {device}")
     
-    # Load the saved weights
-    print("Loading checkpoint...")
-    checkpoint = torch.load(model_path, map_location=device)
-    state_dict = checkpoint["state_dict"]
-    
-    clean_state_dict = {}
-    prefix_to_strip = "model."
-    
-    for k, v in state_dict.items():
-        if k.startswith(prefix_to_strip): 
-            clean_state_dict[k[len(prefix_to_strip):]] = v
-        else:
-            clean_state_dict[k] = v
-
     try:
-        model.load_state_dict(clean_state_dict)
-        print("Model weights loaded successfully.")
-    except RuntimeError as e:
-        print(f"Error loading state_dict: {e}")
-        return
+        lightning_module = HMSLightningModule.load_from_checkpoint(
+            model_path,
+            map_location=device,
+            strict=False  # Allow loading with missing or extra keys
+        )
+        print("Lightning module loaded successfully.")
         
-    model.to(device)
-    model.eval()
+        # Extract the underlying model
+        model = lightning_module.model
+        model.to(device)
+        model.eval()
+        print("Model extracted and set to eval mode.")
+        
+    except Exception as e:
+        print(f"Error loading checkpoint with Lightning: {e}")
+        print(f"\nTrying alternative loading with raw torch.load()...")
+        try:
+            # Try loading with raw torch.load as fallback
+            checkpoint = torch.load(model_path, map_location=device)
+            
+            if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+                print("Found 'state_dict' in checkpoint. Attempting to create model and load weights...")
+                
+                # Create a new model instance
+                model_config = {
+                    "eeg_config": {"use_edge_attr": True},
+                    "spec_config": {"use_edge_attr": False}
+                }
+                model = HMSMultiModalGNN(**model_config)
+                
+                state_dict = checkpoint["state_dict"]
+                clean_state_dict = {}
+                prefix_to_strip = "model."
+                
+                for k, v in state_dict.items():
+                    if k.startswith(prefix_to_strip): 
+                        clean_state_dict[k[len(prefix_to_strip):]] = v
+                    else:
+                        clean_state_dict[k] = v
+                
+                model.load_state_dict(clean_state_dict, strict=False)
+                model.to(device)
+                model.eval()
+                print("Model loaded successfully with fallback method.")
+            else:
+                print("Checkpoint structure not recognized.")
+                return
+                
+        except Exception as fallback_error:
+            print(f"Fallback loading also failed: {fallback_error}")
+            print(f"\nCheckpoint file may be corrupted. Please verify the file exists and is valid.")
+            print(f"File path: {model_path}")
+            print(f"File size: {Path(model_path).stat().st_size if Path(model_path).exists() else 'File not found'} bytes")
+            return
 
     # Load one full data sample
     print(f"Loading data sample from {data_path}...")
@@ -160,7 +195,8 @@ def run_explanation(
     
     # Loop 1: Explain EEG Graphs
     if modality_to_explain in [None, 'eeg']:
-        eeg_edge_attr_bool = model_config["eeg_config"].get("use_edge_attr", True)
+        # EEG uses edge attributes by default
+        eeg_edge_attr_bool = True
         num_eeg_graphs = len(eeg_graphs_sample)
         
         # Determine which indices to run
@@ -189,7 +225,8 @@ def run_explanation(
 
     # Loop 2: Explain Spectrogram Graphs
     if modality_to_explain in [None, 'spec']:
-        spec_edge_attr_bool = model_config["spec_config"].get("use_edge_attr", False)
+        # Spectrogram does not use edge attributes by default
+        spec_edge_attr_bool = False
         num_spec_graphs = len(spec_graphs_sample)
         
         # Determine which indices to run
