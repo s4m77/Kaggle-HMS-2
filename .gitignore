@@ -3,7 +3,7 @@ data/
 .pytest_cache
 .vscode
 logs/
-_pycache_/
+__pycache__
 !src/data
 
 .DS_Store
