@@ -53,4 +53,4 @@ device: mps
 mixed_precision: true
 compile_model: false
 smoke_test: true
-smoke_test_batches: 10
+smoke_test_batches: 15

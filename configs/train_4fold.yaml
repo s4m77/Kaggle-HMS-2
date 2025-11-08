@@ -32,7 +32,7 @@ data:
   data_dir: data/processed
   train_csv: data/raw/train_unique.csv
   n_folds: 4
-  current_fold: 2
+  current_fold: 0
   stratify_by_class: false
   stratify_by_evaluators: true
   evaluator_bins:
