@@ -1,21 +1,10 @@
 docs/
 data/
 .pytest_cache
-
-.venv/
 .vscode
 logs/
-__pycache__/
+_pycache_/
 !src/data
-
-condaenv.*.requirements.txt
-
-condaenv.7eaepzbl.requirements.txt
-
-checkpoints/
-src/__pycache__/__init__.cpython-311.pyc
-tests/__pycache__/test_pipeline.cpython-311-pytest-8.4.2.pyc
-tests/__pycache__/test_resume.cpython-311-pytest-8.4.2.pyc
 
 .DS_Store
 
