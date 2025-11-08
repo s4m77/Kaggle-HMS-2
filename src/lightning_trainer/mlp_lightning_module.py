@@ -9,14 +9,29 @@ import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig
 from pytorch_lightning import LightningModule
-from torchmetrics import Accuracy, MetricCollection
+from torchmetrics import Accuracy, MetricCollection, AUROC
 from torchmetrics.classification import MulticlassF1Score
 
 from src.models.eeg_mlp import EEGMLPBaseline
 
 
 class EEGMLPLightningModule(LightningModule):
-    """Lightning wrapper for the EEG-only MLP baseline that trains on vote distributions."""
+    """
+    Lightning wrapper for the EEG-only MLP baseline that trains on vote distributions.
+    
+    Features:
+    - Trains on vote probability distributions (KL divergence, BCE, or MSE loss)
+    - Metrics for vote prediction:
+        * KL Divergence (loss) - Primary Kaggle metric
+        * Accuracy - Consensus class correctness
+        * F1 Score - Macro-averaged F1
+        * MSE - Vote distribution error
+        * Total Variation Distance - Interpretable vote error
+        * Per-Class MSE - Class-specific error analysis
+        * AUROC - Macro and per-class (validation/test only)
+    - Learning rate scheduling with cosine warmup
+    - Confidence weighting (optional)
+    """
 
     def __init__(self, config: DictConfig) -> None:
         super().__init__()
@@ -49,6 +64,14 @@ class EEGMLPLightningModule(LightningModule):
         self.train_metrics = metrics.clone(prefix="train/")
         self.val_metrics = metrics.clone(prefix="val/")
         self.test_metrics = metrics.clone(prefix="test/")
+        
+        # AUROC metrics for validation and test
+        self.val_auroc = AUROC(task='multiclass', num_classes=self.num_classes, average='macro')
+        self.test_auroc = AUROC(task='multiclass', num_classes=self.num_classes, average='macro')
+        
+        # Per-class AUROC
+        self.val_auroc_per_class = AUROC(task='multiclass', num_classes=self.num_classes, average=None)
+        self.test_auroc_per_class = AUROC(task='multiclass', num_classes=self.num_classes, average=None)
 
     def forward(self, eeg_signal: torch.Tensor) -> torch.Tensor:
         """Run the baseline MLP and return logits."""
@@ -134,6 +157,38 @@ class EEGMLPLightningModule(LightningModule):
                 target_indices = torch.argmax(targets, dim=-1)
             metric_values = metrics(preds, target_indices)
             self.log_dict(metric_values, on_step=False, on_epoch=True, prog_bar=False, batch_size=eeg_signal.size(0))
+        
+        # Additional metrics for vote prediction
+        with torch.no_grad():
+            # Compute predicted probabilities
+            pred_probs = F.softmax(logits, dim=-1)
+            target_probs = self._normalise_targets(targets)
+            
+            # MSE between predicted and true vote distributions
+            mse = F.mse_loss(pred_probs, target_probs, reduction='mean')
+            self.log(f'{stage}/mse', mse, on_step=False, on_epoch=True, prog_bar=False, batch_size=eeg_signal.size(0))
+            
+            # Total Variation Distance: 0.5 * sum(|p - q|)
+            tv_distance = 0.5 * torch.abs(pred_probs - target_probs).sum(dim=-1).mean()
+            self.log(f'{stage}/tv_distance', tv_distance, on_step=False, on_epoch=True, prog_bar=False, batch_size=eeg_signal.size(0))
+            
+            # Per-class MSE (useful for seeing which classes are harder to predict)
+            per_class_mse = ((pred_probs - target_probs) ** 2).mean(dim=0)
+            for i, class_mse in enumerate(per_class_mse):
+                self.log(f'{stage}/mse_class_{i}', class_mse, on_step=False, on_epoch=True, prog_bar=False, batch_size=eeg_signal.size(0))
+        
+        # Update AUROC for validation and test
+        if stage in ['val', 'test']:
+            with torch.no_grad():
+                probs = torch.softmax(logits, dim=-1)
+                target_indices = torch.argmax(targets, dim=-1)
+                
+                if stage == 'val':
+                    self.val_auroc.update(probs, target_indices)
+                    self.val_auroc_per_class.update(probs, target_indices)
+                else:  # test
+                    self.test_auroc.update(probs, target_indices)
+                    self.test_auroc_per_class.update(probs, target_indices)
 
         return loss
 
@@ -185,6 +240,34 @@ class EEGMLPLightningModule(LightningModule):
             return float(min_factor + (1.0 - min_factor) * cosine)
 
         return lr_lambda
+    
+    def on_validation_epoch_end(self):
+        """Compute and log AUROC at the end of validation epoch."""
+        # Compute macro-averaged AUROC
+        auroc_macro = self.val_auroc.compute()
+        self.log('val/auroc_macro', auroc_macro, prog_bar=True)
+        self.val_auroc.reset()
+        
+        # Compute per-class AUROC
+        auroc_per_class = self.val_auroc_per_class.compute()
+        class_names = ['Seizure', 'LPD', 'GPD', 'LRDA', 'GRDA', 'Other']
+        for i, (auroc, name) in enumerate(zip(auroc_per_class, class_names)):
+            self.log(f'val/auroc_{name}', auroc, prog_bar=False)
+        self.val_auroc_per_class.reset()
+    
+    def on_test_epoch_end(self):
+        """Compute and log AUROC at the end of test epoch."""
+        # Compute macro-averaged AUROC
+        auroc_macro = self.test_auroc.compute()
+        self.log('test/auroc_macro', auroc_macro, prog_bar=True)
+        self.test_auroc.reset()
+        
+        # Compute per-class AUROC
+        auroc_per_class = self.test_auroc_per_class.compute()
+        class_names = ['Seizure', 'LPD', 'GPD', 'LRDA', 'GRDA', 'Other']
+        for i, (auroc, name) in enumerate(zip(auroc_per_class, class_names)):
+            self.log(f'test/auroc_{name}', auroc, prog_bar=False)
+        self.test_auroc_per_class.reset()
 
 
 __all__ = ["EEGMLPLightningModule"]

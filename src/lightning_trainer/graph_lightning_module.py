@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from pytorch_lightning import LightningModule
-from torchmetrics import Accuracy, MetricCollection
+from torchmetrics import Accuracy, MetricCollection, AUROC
 
 from src.models import HMSMultiModalGNN
 from src.models.regularization import compute_graph_regularization
@@ -106,6 +106,15 @@ class HMSLightningModule(LightningModule):
         self.train_metrics = metrics.clone(prefix='train/')
         self.val_metrics = metrics.clone(prefix='val/')
         self.test_metrics = metrics.clone(prefix='test/')
+        
+        # AUROC metrics for validation and test (one-vs-rest for each class)
+        # These are computed separately because they need probability predictions
+        self.val_auroc = AUROC(task='multiclass', num_classes=num_classes, average='macro')
+        self.test_auroc = AUROC(task='multiclass', num_classes=num_classes, average='macro')
+        
+        # Per-class AUROC for detailed analysis
+        self.val_auroc_per_class = AUROC(task='multiclass', num_classes=num_classes, average=None)
+        self.test_auroc_per_class = AUROC(task='multiclass', num_classes=num_classes, average=None)
     
     def forward(self, eeg_graphs, spec_graphs):
         """Forward pass through the model."""
@@ -249,6 +258,19 @@ class HMSLightningModule(LightningModule):
             for i, class_mse in enumerate(per_class_mse):
                 self.log(f'{stage}/mse_class_{i}', class_mse, on_step=False, on_epoch=True, prog_bar=False, batch_size=batch_size)
         
+        # Compute AUROC for validation and test (not train to save computation)
+        if stage in ['val', 'test']:
+            # Compute predicted probabilities
+            pred_probs = F.softmax(logits, dim=-1)
+            
+            # Update AUROC metrics
+            if stage == 'val':
+                self.val_auroc.update(pred_probs, target_classes)
+                self.val_auroc_per_class.update(pred_probs, target_classes)
+            else:  # test
+                self.test_auroc.update(pred_probs, target_classes)
+                self.test_auroc_per_class.update(pred_probs, target_classes)
+        
         return loss
     
     def training_step(self, batch: Dict, batch_idx: int):
@@ -262,6 +284,34 @@ class HMSLightningModule(LightningModule):
     def test_step(self, batch: Dict, batch_idx: int):
         """Test step."""
         return self._step(batch, batch_idx, 'test')
+    
+    def on_validation_epoch_end(self):
+        """Compute and log AUROC at the end of validation epoch."""
+        # Compute macro-averaged AUROC
+        auroc_macro = self.val_auroc.compute()
+        self.log('val/auroc_macro', auroc_macro, prog_bar=True)
+        self.val_auroc.reset()
+        
+        # Compute per-class AUROC
+        auroc_per_class = self.val_auroc_per_class.compute()
+        class_names = ['Seizure', 'LPD', 'GPD', 'LRDA', 'GRDA', 'Other']
+        for i, (auroc, name) in enumerate(zip(auroc_per_class, class_names)):
+            self.log(f'val/auroc_{name}', auroc, prog_bar=False)
+        self.val_auroc_per_class.reset()
+    
+    def on_test_epoch_end(self):
+        """Compute and log AUROC at the end of test epoch."""
+        # Compute macro-averaged AUROC
+        auroc_macro = self.test_auroc.compute()
+        self.log('test/auroc_macro', auroc_macro, prog_bar=True)
+        self.test_auroc.reset()
+        
+        # Compute per-class AUROC
+        auroc_per_class = self.test_auroc_per_class.compute()
+        class_names = ['Seizure', 'LPD', 'GPD', 'LRDA', 'GRDA', 'Other']
+        for i, (auroc, name) in enumerate(zip(auroc_per_class, class_names)):
+            self.log(f'test/auroc_{name}', auroc, prog_bar=False)
+        self.test_auroc_per_class.reset()
     
     def configure_optimizers(self):
         """Configure optimizer and learning rate scheduler."""

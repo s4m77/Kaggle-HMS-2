@@ -232,8 +232,42 @@ def collate_graphs(batch: List[Dict]) -> Dict:
     # Extract components
     eeg_sequences = [sample['eeg_graphs'] for sample in batch]  # List[List[9 graphs]]
     spec_sequences = [sample['spec_graphs'] for sample in batch]  # List[List[119 graphs]]
-    targets = torch.stack([sample['target'] for sample in batch])  # Shape: (batch_size, 6)
-    consensus_labels = torch.tensor([sample.get('consensus_label', -1) for sample in batch], dtype=torch.long)
+    
+    # Handle both old format (int) and new format (tensor) for targets
+    target_list = []
+    consensus_label_list = []
+    old_format_detected = False
+    
+    for sample in batch:
+        target = sample['target']
+        if isinstance(target, torch.Tensor):
+            # New format: vote distribution (shape: [6])
+            target_list.append(target)
+            # Get consensus label from tensor (argmax) or from explicit field
+            consensus_label = sample.get('consensus_label', torch.argmax(target).item())
+        else:
+            # Old format: integer class label
+            # Convert to one-hot distribution for compatibility
+            old_format_detected = True
+            target_tensor = torch.zeros(6, dtype=torch.float32)
+            target_tensor[int(target)] = 1.0
+            target_list.append(target_tensor)
+            consensus_label = int(target)
+        consensus_label_list.append(consensus_label)
+    
+    # Warn user about old format (only once per process)
+    if old_format_detected and not hasattr(collate_graphs, '_old_format_warned'):
+        import warnings
+        warnings.warn(
+            "Old data format detected (integer labels). Converting to one-hot encoding. "
+            "For true vote distributions, reprocess data with: "
+            "python src/data/make_graph_dataset.py --config configs/graphs.yaml",
+            UserWarning
+        )
+        collate_graphs._old_format_warned = True
+    
+    targets = torch.stack(target_list)  # Shape: (batch_size, 6)
+    consensus_labels = torch.tensor(consensus_label_list, dtype=torch.long)
     patient_ids = [sample['patient_id'] for sample in batch]
     label_ids = [sample['label_id'] for sample in batch]
     
