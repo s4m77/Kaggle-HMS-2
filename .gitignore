@@ -16,3 +16,9 @@ checkpoints/
 src/__pycache__/__init__.cpython-311.pyc
 tests/__pycache__/test_pipeline.cpython-311-pytest-8.4.2.pyc
 tests/__pycache__/test_resume.cpython-311-pytest-8.4.2.pyc
+
+.DS_Store
+
+wandb/
+
+processed/

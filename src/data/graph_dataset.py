@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Dict, List, Optional, Callable, Any
+try:
+    from tqdm import tqdm
+except Exception:
+    # Fallback if tqdm is not available
+    def tqdm(iterable, **kwargs):
+        return iterable
 
 import torch
 import pandas as pd
@@ -42,12 +48,14 @@ class HMSDataset(Dataset):
         is_train: bool = True,
         transform: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         preload_patients: bool = False,
+        remote_cache: Optional[Dict[int, Dict[int, Dict[str, Any]]]] = None,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.metadata_df = metadata_df.reset_index(drop=True)
         self.is_train = is_train
         self.transform = transform
         self.preload_patients = preload_patients
+        self.remote_cache = remote_cache
         
         # Build index: list of indices into metadata_df
         self.sample_indices: List[int] = list(range(len(self.metadata_df)))
@@ -65,9 +73,10 @@ class HMSDataset(Dataset):
         # In-memory per-patient cache to avoid repeated disk I/O and serialization
         self._patient_cache: Dict[int, Dict[int, Dict[str, Any]]] = {}
 
-        if self.preload_patients:
+        if self.remote_cache is None and self.preload_patients:
             # Preload and sanitize all referenced patients (uses RAM; ensure capacity)
-            for pid in sorted(self.metadata_df['patient_id'].unique()):
+            unique_pids = sorted(self.metadata_df['patient_id'].unique())
+            for pid in tqdm(unique_pids, desc="Preloading patients", total=len(unique_pids)):
                 path = self.data_dir / f"patient_{int(pid)}.pt"
                 if path.exists():
                     data = torch.load(path, weights_only=False)
@@ -103,7 +112,9 @@ class HMSDataset(Dataset):
         label_id = int(row['label_id'])
         
         # Load patient file (cache and sanitize once per patient)
-        if patient_id in self._patient_cache:
+        if self.remote_cache is not None:
+            patient_data = self.remote_cache[patient_id]
+        elif patient_id in self._patient_cache:
             patient_data = self._patient_cache[patient_id]
         else:
             patient_path = self.data_dir / f"patient_{patient_id}.pt"
@@ -122,7 +133,8 @@ class HMSDataset(Dataset):
         sample = {
             'eeg_graphs': eeg_graphs,
             'spec_graphs': spec_graphs,
-            'target': sample_data['target'],
+            'target': sample_data['target'],  # Shape: (6,) vote distribution
+            'consensus_label': sample_data.get('consensus_label', -1),  # Integer label for metrics
             'patient_id': patient_id,
             'label_id': label_id,
         }
@@ -220,7 +232,8 @@ def collate_graphs(batch: List[Dict]) -> Dict:
     # Extract components
     eeg_sequences = [sample['eeg_graphs'] for sample in batch]  # List[List[9 graphs]]
     spec_sequences = [sample['spec_graphs'] for sample in batch]  # List[List[119 graphs]]
-    targets = torch.tensor([sample['target'] for sample in batch], dtype=torch.long)
+    targets = torch.stack([sample['target'] for sample in batch])  # Shape: (batch_size, 6)
+    consensus_labels = torch.tensor([sample.get('consensus_label', -1) for sample in batch], dtype=torch.long)
     patient_ids = [sample['patient_id'] for sample in batch]
     label_ids = [sample['label_id'] for sample in batch]
     
@@ -234,12 +247,7 @@ def collate_graphs(batch: List[Dict]) -> Dict:
         batched_graph = Batch.from_data_list(graphs_at_t)
         batched_eeg_graphs.append(batched_graph)
     
-    # Batch Spectrogram graphs: subsample timesteps globally to reduce object count
-    all_spec_steps = len(spec_sequences[0])
-    max_spec_steps = 40
-    if all_spec_steps > max_spec_steps:
-        keep_idx = np.linspace(0, all_spec_steps - 1, max_spec_steps, dtype=int)
-        spec_sequences = [[seq[i] for i in keep_idx] for seq in spec_sequences]
+    # Batch Spectrogram graphs: keep all timesteps to preserve temporal information
     num_spec_timesteps = len(spec_sequences[0])
     batched_spec_graphs = []
     for t in range(num_spec_timesteps):
@@ -254,7 +262,8 @@ def collate_graphs(batch: List[Dict]) -> Dict:
     return {
         'eeg_graphs': batched_eeg_graphs,  # List[9] of Batch objects
         'spec_graphs': batched_spec_graphs,  # List[119] of Batch objects (with 4 features each)
-        'targets': targets,  # (batch_size,)
+        'targets': targets,  # (batch_size, 6) - vote probability distributions
+        'consensus_labels': consensus_labels,  # (batch_size,) - integer labels for metrics
         'patient_ids': patient_ids,
         'label_ids': label_ids,
     }

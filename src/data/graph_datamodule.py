@@ -67,6 +67,10 @@ class HMSDataModule(LightningDataModule):
         prefetch_factor: int = 4,
         shuffle_seed: int = 42,
         preload_patients: bool = False,
+        use_cache_server: bool = False,
+        cache_host: str = "127.0.0.1",
+        cache_port: int = 50000,
+        cache_authkey: str = "hms-cache",
     ) -> None:
         super().__init__()
         
@@ -84,6 +88,10 @@ class HMSDataModule(LightningDataModule):
         self.prefetch_factor = prefetch_factor
         self.shuffle_seed = shuffle_seed
         self.preload_patients = preload_patients
+        self.use_cache_server = use_cache_server
+        self.cache_host = cache_host
+        self.cache_port = cache_port
+        self.cache_authkey = cache_authkey
         # Track setup stages to avoid double-initialization when Trainer also calls setup
         self._setup_done: set[str] = set()
         
@@ -202,6 +210,21 @@ class HMSDataModule(LightningDataModule):
             self.metadata_df.loc[val_idx, 'fold'] = fold
         
         # Create train and validation datasets
+        # Optional remote cache connection
+        remote_cache = None
+        if self.use_cache_server:
+            try:
+                from multiprocessing.managers import BaseManager
+                class _ClientManager(BaseManager):
+                    pass
+                _ClientManager.register('get_cache')
+                mgr = _ClientManager(address=(self.cache_host, int(self.cache_port)), authkey=self.cache_authkey.encode('utf-8'))
+                mgr.connect()
+                remote_cache = mgr.get_cache()
+                print(f"Connected to CacheServer at {self.cache_host}:{self.cache_port}")
+            except Exception as e:
+                print(f"Warning: Could not connect to CacheServer: {e}. Continuing without remote cache.")
+
         if stage == "fit" or stage is None:
             train_df = self.metadata_df[
                 self.metadata_df['fold'] != self.current_fold
@@ -217,6 +240,7 @@ class HMSDataModule(LightningDataModule):
                     metadata_df=train_df,
                     is_train=True,
                     preload_patients=self.preload_patients,
+                    remote_cache=remote_cache,
                 )
             
             if self.val_dataset is None:
@@ -225,6 +249,7 @@ class HMSDataModule(LightningDataModule):
                     metadata_df=val_df,
                     is_train=False,
                     preload_patients=self.preload_patients,
+                    remote_cache=remote_cache,
                 )
             
             # Compute class weights from training set

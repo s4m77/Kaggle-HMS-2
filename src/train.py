@@ -3,6 +3,7 @@
 import sys
 from pathlib import Path
 
+import torch
 from omegaconf import OmegaConf
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
@@ -14,6 +15,8 @@ sys.path.insert(0, str(project_root))
 
 from src.data import HMSDataModule
 from src.lightning_trainer import HMSLightningModule, HMSEEGOnlyLightningModule
+import subprocess
+import time
 
 MODEL_REGISTRY = {
     "multi_modal": {
@@ -34,7 +37,7 @@ DEFAULT_MODEL_TYPE = "multi_modal"
 def train(
     train_config_path: str = "configs/train.yaml",
     model_config_path: str | None = None,
-    wandb_project: str = "hms-brain-activity",
+    wandb_project: str = "hms-brain-activity-Final",
     wandb_name: str | None = None,
     resume_from_checkpoint: str | None = None,
 ):
@@ -59,6 +62,12 @@ def train(
         torch.set_float32_matmul_precision('high')
         cuda_backends.matmul.allow_tf32 = True
         cuda_backends.cudnn.allow_tf32 = True
+        # Reduce torch.compile graph breaks on scalar ops
+        try:
+            import torch._dynamo as dynamo
+            dynamo.config.capture_scalar_outputs = True
+        except Exception:
+            pass
     except Exception:
         pass
     # Load configurations
@@ -109,6 +118,7 @@ def train(
     # Adjust loader aggressiveness during smoke tests to avoid system limits
     _is_smoke = bool(getattr(train_config, "smoke_test", False))
     preload_flag = bool(train_config.data.get('preload_patients', False))
+    use_cache_server = bool(train_config.data.get('use_cache_server', False))
     dm_num_workers = train_config.data.num_workers if not _is_smoke else max(0, min(8, int(train_config.data.num_workers)))
     # When preloading all patients into the Dataset, avoid multiprocessing to prevent pickling/FD sharing of large caches
     if preload_flag and dm_num_workers > 0:
@@ -118,6 +128,11 @@ def train(
     dm_prefetch = train_config.data.get('prefetch_factor', 4)
     if _is_smoke:
         dm_prefetch = 2
+
+    # Optionally ensure CacheServer is running (best-effort)
+    if use_cache_server:
+        # Try quick connect first via DataModule (will print warning if fails)
+        pass
 
     datamodule = HMSDataModule(
         data_dir=train_config.data.data_dir,
@@ -134,6 +149,10 @@ def train(
         prefetch_factor=dm_prefetch if dm_num_workers > 0 else None,
         shuffle_seed=train_config.data.shuffle_seed,
         preload_patients=preload_flag,
+        use_cache_server=use_cache_server,
+        cache_host=str(train_config.data.get('cache_host', '127.0.0.1')),
+        cache_port=int(train_config.data.get('cache_port', 50000)),
+        cache_authkey=str(train_config.data.get('cache_authkey', 'hms-cache')),
     )
     
     # Setup to get class weights
@@ -142,8 +161,12 @@ def train(
     
     # Initialize Lightning Module
     print("Initializing Model...")
+    # Prepare model config with use_regional_fusion at the right level
+    full_model_config = OmegaConf.to_container(model_config.model, resolve=True)
+    full_model_config['use_regional_fusion'] = model_config.get('use_regional_fusion', True)
+    
     model = lightning_module_cls(
-        model_config=model_config.model,
+        model_config=full_model_config,
         num_classes=model_config.model.num_classes,
         learning_rate=train_config.learning_rate,
         weight_decay=train_config.regularization.weight_decay,
@@ -272,8 +295,9 @@ def train(
     # Optionally compile model for PyTorch 2.x
     if getattr(train_config, "compile_model", False) and hasattr(torch, "compile") and accelerator == 'gpu':
         try:
-            model = torch.compile(model, mode="max-autotune")
-            print("Enabled torch.compile with mode=max-autotune")
+            compile_mode = str(getattr(train_config, "compile_mode", "reduce-overhead"))
+            model = torch.compile(model, mode=compile_mode)
+            print(f"Enabled torch.compile with mode={compile_mode}")
         except Exception as e:
             print(f"torch.compile failed, continuing without compile: {e}")
 
@@ -296,15 +320,17 @@ def train(
         log_every_n_steps=10,
         val_check_interval=0.25,
         deterministic=False,
+        num_sanity_val_steps=0,
     )
 
     # Smoke test limits for super-fast runs
     if getattr(train_config, "smoke_test", False):
+        smoke_batches = getattr(train_config, "smoke_test_batches", 2)
         trainer_kwargs.update({
             "max_epochs": 1,
-            "limit_train_batches": 2,
-            "limit_val_batches": 2,
-            "limit_test_batches": 2,
+            "limit_train_batches": smoke_batches,
+            "limit_val_batches": smoke_batches,
+            "limit_test_batches": smoke_batches,
             "num_sanity_val_steps": 0,
             "log_every_n_steps": 1,
         })

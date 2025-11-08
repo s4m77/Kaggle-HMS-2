@@ -1,16 +1,17 @@
-model_config: configs/model_eeg.yaml
+model_config: configs/model.yaml
 batch_size: 128
 num_epochs: 100
 learning_rate: 0.0003
 weight_decay: 0.0001
-wandb_project: hms-brain-activity-KL-eeg
-wandb_name: sam-rtx-fold0
+wandb_project: hms-brain-activity-KL
+wandb_name: h200-fold0
 wandb_tags:
 - h200
 - bf16
 - gnn
 - graphs
-wandb_group: cv-folds
+- 4fold
+wandb_group: cv-4fold
 wandb_job_type: train
 scheduler:
   type: ReduceLROnPlateau
@@ -30,7 +31,7 @@ regularization:
 data:
   data_dir: data/processed
   train_csv: data/raw/train_unique.csv
-  n_folds: 5
+  n_folds: 4
   current_fold: 0
   stratify_by_class: false
   stratify_by_evaluators: true
