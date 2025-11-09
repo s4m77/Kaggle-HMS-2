@@ -34,6 +34,12 @@ kaggle competitions download -c hms-harmful-brain-activity-classification
 jupyter execute notebooks/eda.ipynb
 ```
 
+3. Create the Graph Dataset
+
+```shell
+python src/data/make_graph_dataset.py
+```
+
 ### Train the models
 
 1. AlphaHMS:
