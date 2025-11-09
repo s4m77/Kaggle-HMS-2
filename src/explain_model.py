@@ -104,7 +104,6 @@ def run_explanation(
     print(f"Loading data sample from {data_path}...")
     try:
         data_dict = torch.load(data_path, map_location='cpu')
-        print(data_dict)
         sample_id = list(data_dict.keys())[0]
         sample_data = data_dict[sample_id]
         
