@@ -8,7 +8,4 @@ __pycache__
 explanations/
 checkpoints/
 .DS_Store
-
 wandb/
-
-processed/
