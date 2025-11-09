@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Dict, Optional
+
 import torch
 from torch import nn
 
@@ -35,7 +37,7 @@ class CrossModalFusion(nn.Module):
         dropout: float = 0.2,
     ) -> None:
         super().__init__()
-        
+        self.last_attention: Optional[Dict[str, torch.Tensor]] = None
         self.eeg_dim = eeg_dim
         self.spec_dim = spec_dim
         self.hidden_dim = hidden_dim
@@ -100,7 +102,9 @@ class CrossModalFusion(nn.Module):
         spec_proj = self.spec_proj(spec_features)  # (batch, seq_len, hidden_dim)
         
         # EEG attends to Spectrogram
-        eeg_attended, _ = self.eeg_to_spec_attn(
+        self.last_attention = None
+
+        eeg_attended, eeg_attn_weights = self.eeg_to_spec_attn(
             query=eeg_proj,
             key=spec_proj,
             value=spec_proj,
@@ -109,7 +113,7 @@ class CrossModalFusion(nn.Module):
         eeg_attended = self.dropout(eeg_attended)
         
         # Spectrogram attends to EEG
-        spec_attended, _ = self.spec_to_eeg_attn(
+        spec_attended, spec_attn_weights = self.spec_to_eeg_attn(
             query=spec_proj,
             key=eeg_proj,
             value=eeg_proj,
@@ -123,8 +127,15 @@ class CrossModalFusion(nn.Module):
         
         # Concatenate modalities
         fused = torch.cat([eeg_pooled, spec_pooled], dim=1)  # (batch, 2*hidden_dim)
-        
+        self.last_attention = {
+            "eeg_to_spec": eeg_attn_weights.detach().cpu(),
+            "spec_to_eeg": spec_attn_weights.detach().cpu(),
+        }
         return fused
+
+    def get_last_attention(self) -> Optional[Dict[str, torch.Tensor]]:
+        """Return the most recent set of attention weights."""
+        return self.last_attention
 
 
 __all__ = ["CrossModalFusion"]

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Dict, Optional
+
 import torch
 from torch import nn
 
@@ -60,6 +62,7 @@ class RegionalCrossModalFusion(nn.Module):
         self.num_spec_regions = num_spec_regions
         self.hidden_dim = hidden_dim
         self.use_attention_pooling = use_attention_pooling
+        self.last_attention: Optional[Dict[str, torch.Tensor]] = None
         
         # Project to common dimension if needed
         self.eeg_proj = nn.Linear(eeg_dim, hidden_dim) if eeg_dim != hidden_dim else nn.Identity()
@@ -141,6 +144,8 @@ class RegionalCrossModalFusion(nn.Module):
         # EEG regions attend to Spectrogram regions
         # Query: EEG regions want information from Spec regions
         # Key/Value: Spec regions provide information
+        self.last_attention = None
+
         eeg_attended, eeg_attn_weights = self.eeg_to_spec_attn(
             query=eeg_proj,
             key=spec_proj,
@@ -183,14 +188,25 @@ class RegionalCrossModalFusion(nn.Module):
             
             # Weighted sum of regional features
             pooled = (regional_fused * attention_weights).sum(dim=1)  # (batch, region_fusion_dim)
-            
+            self.last_attention = {
+                "eeg_to_spec": eeg_attn_weights.detach().cpu(),
+                "spec_to_eeg": spec_attn_weights.detach().cpu(),
+                "regional_pool": attention_weights.detach().cpu(),
+            }
             return pooled
         else:
             # Return all regional features (flatten)
             # Useful for region-level analysis or interpretability
             fused_flat = regional_fused.reshape(batch_size, -1)  # (batch, num_regions * region_fusion_dim)
-            
+            self.last_attention = {
+                "eeg_to_spec": eeg_attn_weights.detach().cpu(),
+                "spec_to_eeg": spec_attn_weights.detach().cpu(),
+            }
             return fused_flat
+
+    def get_last_attention(self) -> Optional[Dict[str, torch.Tensor]]:
+        """Return the most recent set of attention weights."""
+        return self.last_attention
 
 
 __all__ = ["RegionalCrossModalFusion"]

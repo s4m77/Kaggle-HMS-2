@@ -1,0 +1,82 @@
+{
+  "sample_id": "1444607283",
+  "target": [
+    0.9333333373069763,
+    0.06666667014360428,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "prediction": 0,
+  "eeg_to_spec": {
+    "source_focus": {
+      "Frontal": 0.062423232942819595,
+      "Central": 0.5650558471679688,
+      "Parietal": 0.17830218374729156,
+      "Occipital": 0.19421879947185516
+    },
+    "target_importance": {
+      "Left Frontal": 0.2043457180261612,
+      "Right Frontal": 0.2974693477153778,
+      "Left Parietal": 0.23009911179542542,
+      "Right Parietal": 0.2680858373641968
+    },
+    "top_interactions": [
+      {
+        "pair": "Central -> Right Frontal",
+        "attention": 0.358217716217041,
+        "above_uniform": 0.10821771621704102,
+        "percent_above_uniform": 43.287086486816406
+      },
+      {
+        "pair": "Central -> Right Parietal",
+        "attention": 0.2899516224861145,
+        "above_uniform": 0.0399516224861145,
+        "percent_above_uniform": 15.9806489944458
+      },
+      {
+        "pair": "Occipital -> Right Frontal",
+        "attention": 0.28507089614868164,
+        "above_uniform": 0.03507089614868164,
+        "percent_above_uniform": 14.028358459472656
+      }
+    ],
+    "uniform_value": 0.25
+  },
+  "spec_to_eeg": {
+    "source_focus": {
+      "Left Frontal": 0.08527400344610214,
+      "Right Frontal": 0.4351172149181366,
+      "Left Parietal": 0.1332734078168869,
+      "Right Parietal": 0.34633538126945496
+    },
+    "target_importance": {
+      "Frontal": 0.2631424367427826,
+      "Central": 0.2520836591720581,
+      "Parietal": 0.24254556000232697,
+      "Occipital": 0.24222834408283234
+    },
+    "top_interactions": [
+      {
+        "pair": "Right Frontal -> Frontal",
+        "attention": 0.2864314913749695,
+        "above_uniform": 0.03643149137496948,
+        "percent_above_uniform": 14.572596549987793
+      },
+      {
+        "pair": "Right Parietal -> Frontal",
+        "attention": 0.2760923206806183,
+        "above_uniform": 0.026092320680618286,
+        "percent_above_uniform": 10.436927795410156
+      },
+      {
+        "pair": "Left Parietal -> Central",
+        "attention": 0.2556493282318115,
+        "above_uniform": 0.0056493282318115234,
+        "percent_above_uniform": 2.2597312927246094
+      }
+    ],
+    "uniform_value": 0.25
+  }
+}
