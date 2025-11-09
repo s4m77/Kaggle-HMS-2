@@ -1,6 +1,4 @@
 import argparse
-import sys
-from pathlib import Path
 import torch
 from torch_geometric.data import Batch
 from torch_geometric.explain import Explainer, GNNExplainer

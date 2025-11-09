@@ -1,4 +1,5 @@
 """
+NOT WORKING 
 GNNExplainer for spatial pattern analysis in EEG graphs.
 
 This script loads a trained model checkpoint and explains which electrodes and
@@ -14,7 +15,7 @@ Usage:
 import sys
 import argparse
 from pathlib import Path
-from typing import Dict, Tuple, Optional, Any
+from typing import Dict, Optional, Any
 
 import torch
 import numpy as np
@@ -22,7 +23,6 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
-import seaborn as sns
 from torch_geometric.data import Batch
 from torch_geometric.explain import Explainer, GNNExplainer as GNNExplainerAlgo
 

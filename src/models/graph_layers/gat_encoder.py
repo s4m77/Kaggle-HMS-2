@@ -5,13 +5,13 @@ from __future__ import annotations
 import torch
 from torch import nn
 from torch_geometric.data import Batch
-from torch_geometric.nn import GATConv
+from torch_geometric.nn import GATv2Conv
 
 
 class GATEncoder(nn.Module):
     """Multi-layer GAT encoder for graph data.
     
-    Stacks multiple GAT layers with residual connections and dropout.
+    Stacks multiple GATv2Conv layers with residual connections and dropout.
     
     Parameters
     ----------
@@ -22,7 +22,7 @@ class GATEncoder(nn.Module):
     out_dim : int
         Output dimension for final embeddings
     num_layers : int
-        Number of GAT layers
+        Number of GATv2Conv layers
     heads : int
         Number of attention heads
     dropout_p : float
@@ -58,7 +58,7 @@ class GATEncoder(nn.Module):
         # First layer: in_channels -> hidden_dim * heads
         edge_dim = 1 if use_edge_attr else None
         self.convs.append(
-            GATConv(
+            GATv2Conv(
                 in_channels=in_channels,
                 out_channels=hidden_dim,
                 heads=heads,
@@ -73,7 +73,7 @@ class GATEncoder(nn.Module):
         # Middle layers: hidden_dim * heads -> hidden_dim * heads
         for _ in range(num_layers - 2):
             self.convs.append(
-                GATConv(
+                GATv2Conv(
                     in_channels=hidden_dim * heads,
                     out_channels=hidden_dim,
                     heads=heads,
@@ -88,7 +88,7 @@ class GATEncoder(nn.Module):
         # Last layer: hidden_dim * heads -> out_dim (average heads)
         if num_layers > 1:
             self.convs.append(
-                GATConv(
+                GATv2Conv(
                     in_channels=hidden_dim * heads,
                     out_channels=out_dim,
                     heads=heads,

@@ -40,7 +40,7 @@ jupyter execute notebooks/eda.ipynb
 python src/data/make_graph_dataset.py
 ```
 
-### Train the models
+### Training + Experiments
 
 1. AlphaHMS:
 
@@ -60,4 +60,4 @@ python src/train.py --train-config configs/train.yaml
 python src/train_mlp.py --config configs/training_mlp.yaml
 ```
 
-Training scripts use WandB as logger; you may be asked to log into your account beforehand.
+Training scripts use WandB as logger; you may be asked to log into your account beforehand. Evaluation of the model is performed at the end of the training stage.
