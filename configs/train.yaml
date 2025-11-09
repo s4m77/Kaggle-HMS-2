@@ -4,7 +4,7 @@ num_epochs: 100
 learning_rate: 0.0003
 weight_decay: 0.0001
 wandb_project: hms-brain-activity-KL
-wandb_name: h200-fold0
+wandb_name: sam-rtx-fold0
 wandb_tags:
 - h200
 - bf16
@@ -32,7 +32,7 @@ data:
   train_csv: data/raw/train_unique.csv
   n_folds: 5
   current_fold: 0
-  stratify_by_class: false
+  stratify_by_class: true
   stratify_by_evaluators: true
   evaluator_bins:
   - 0
@@ -48,7 +48,6 @@ data:
   shuffle_seed: 42
   preload_patients: true
   build_scope: train+val
-  # Use many CPUs to build graphs fast (one-time per patient)
   build_workers: 32
 hardware:
   device: cuda

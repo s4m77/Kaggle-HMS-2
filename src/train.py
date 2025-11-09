@@ -37,7 +37,7 @@ DEFAULT_MODEL_TYPE = "multi_modal"
 def train(
     train_config_path: str = "configs/train.yaml",
     model_config_path: str | None = None,
-    wandb_project: str = "hms-brain-activity",
+    wandb_project: str = "hms-brain-activity-Final",
     wandb_name: str | None = None,
     resume_from_checkpoint: str | None = None,
 ):
@@ -161,8 +161,12 @@ def train(
     
     # Initialize Lightning Module
     print("Initializing Model...")
+    # Prepare model config with use_regional_fusion at the right level
+    full_model_config = OmegaConf.to_container(model_config.model, resolve=True)
+    full_model_config['use_regional_fusion'] = model_config.get('use_regional_fusion', True)
+    
     model = lightning_module_cls(
-        model_config=model_config.model,
+        model_config=full_model_config,
         num_classes=model_config.model.num_classes,
         learning_rate=train_config.learning_rate,
         weight_decay=train_config.regularization.weight_decay,
@@ -321,11 +325,12 @@ def train(
 
     # Smoke test limits for super-fast runs
     if getattr(train_config, "smoke_test", False):
+        smoke_batches = getattr(train_config, "smoke_test_batches", 2)
         trainer_kwargs.update({
             "max_epochs": 1,
-            "limit_train_batches": 2,
-            "limit_val_batches": 2,
-            "limit_test_batches": 2,
+            "limit_train_batches": smoke_batches,
+            "limit_val_batches": smoke_batches,
+            "limit_test_batches": smoke_batches,
             "num_sanity_val_steps": 0,
             "log_every_n_steps": 1,
         })

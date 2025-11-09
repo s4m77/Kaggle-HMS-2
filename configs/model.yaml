@@ -2,6 +2,9 @@
 
 model_type: "multi_modal"
 
+# Regional Fusion Configuration
+use_regional_fusion: true # If true, preserves regional structure through fusion
+
 model:
   num_classes: 6 # Seizure, LPD, GPD, LRDA, GRDA, Other
 
@@ -16,7 +19,7 @@ model:
     gat_num_layers: 2
     gat_heads: 4 # Multi-head attention
     gat_dropout: 0.3
-    use_edge_attr: false # Use coherence as edge weights
+    use_edge_attr: true # Use coherence as edge weights
 
     # BiLSTM parameters
     rnn_hidden_dim: 128
@@ -26,11 +29,36 @@ model:
 
     # Pooling method for graph-level features
     pooling_method: "mean" # Options: "mean", "max", "add"
+    
+    # Hierarchical pooling (BEFORE LSTM for regional temporal modeling)
+    use_hierarchical_pooling: true # Pool by brain regions before temporal modeling
+    num_regions: 4 # Number of clinical brain regions (Frontal, Central, Parietal, Occipital)
+    return_regional_features: true # CRITICAL: Return regional features for regional fusion
+    channels: # EEG channel names (19 total)
+      - Fp1
+      - F3
+      - C3
+      - P3
+      - F7
+      - T3
+      - T5
+      - O1
+      - Fz
+      - Cz
+      - Pz
+      - Fp2
+      - F4
+      - C4
+      - P4
+      - F8
+      - T4
+      - T6
+      - O2
 
   # Spectrogram Encoder Configuration
   # Processes 119 temporal spectrogram graphs (each with 4 nodes)
   spec_encoder:
-    in_channels: 4 # Node features: [delta, theta, alpha, beta] (gamma dropped - always 0)
+    in_channels: 4 # Node features: [delta, theta, alpha, beta] (spectrograms only go to ~20Hz)
 
     # GAT parameters
     gat_hidden_dim: 64
@@ -48,14 +76,26 @@ model:
 
     # Pooling method
     pooling_method: "mean"
+    
+    # Hierarchical pooling (spectrogram already has 4 regions: LL, RL, LP, RP)
+    use_hierarchical_pooling: true # Preserve regional structure
+    num_regions: 4 # Number of spectrogram regions (LL, RL, LP, RP)
+    return_regional_features: true # CRITICAL: Return regional features for regional fusion
+    channels: # Spectrogram channel names (4 regions)
+      - LL  # Left-Left
+      - RL  # Right-Left
+      - LP  # Left-Parietal
+      - RP  # Right-Parietal
 
   # Cross-Modal Fusion Configuration
-  # Fuses EEG (256-dim) and Spectrogram (256-dim) features
+  # Fuses EEG (256-dim per region) and Spectrogram (256-dim per region) features
   fusion:
     hidden_dim: 256 # Projection dimension for attention
     num_heads: 8 # Multi-head cross-attention
     dropout: 0.2
-    # Output dim will be 512 (256 + 256 concatenated)
+    use_attention_pooling: true # Pool regions after fusion (output: 512-dim)
+    # If false, outputs all regions concatenated (output: num_regions * 512-dim)
+    # Output dim will be 512 (256 + 256 concatenated per region, then pooled)
 
   # Classifier Configuration
   # Maps fused features (512-dim) to 6 classes
@@ -63,3 +103,4 @@ model:
     hidden_dims: [256, 128] # Two hidden layers
     dropout: 0.3
     activation: "elu" # Options: "relu", "gelu", "elu"
+

@@ -12,11 +12,12 @@ from src.models import TemporalGraphEncoder, MLPClassifier
 
 
 class HMSEEGOnlyGNN(nn.Module):
-    """GNN that processes only EEG temporal graph sequences.
+    """EEG-only GNN that mirrors the EEG branch of the multi-modal model.
 
     Architecture:
-    1. EEG Branch: temporal sequence of EEG graphs → GAT → BiLSTM → features
-    2. Classifier: MLP → class predictions
+    1. EEG Branch: temporal sequence of EEG graphs + GAT + BiLSTM
+    2. Optional regional flattening (to mimic regional fusion behaviour)
+    3. Classifier: MLP -> class predictions
 
     Parameters
     ----------
@@ -26,6 +27,9 @@ class HMSEEGOnlyGNN(nn.Module):
         Configuration for classifier
     num_classes : int
         Number of output classes (default: 6)
+    use_regional_fusion : bool
+        If True, keep regional structure (flatten regions for classifier).
+        If False, fall back to single pooled vector (legacy behaviour).
     """
 
     def __init__(
@@ -33,11 +37,17 @@ class HMSEEGOnlyGNN(nn.Module):
         eeg_config: Optional[dict] = None,
         classifier_config: Optional[dict] = None,
         num_classes: int = 6,
+        use_regional_fusion: bool = True,
     ) -> None:
         super().__init__()
 
         eeg_config = eeg_config or {}
         classifier_config = classifier_config or {}
+
+        self.use_regional_fusion = use_regional_fusion
+        self.num_classes = num_classes
+
+        num_eeg_regions = eeg_config.get("num_regions", 4)
 
         self.eeg_encoder = TemporalGraphEncoder(
             in_channels=eeg_config.get("in_channels", 5),
@@ -52,19 +62,28 @@ class HMSEEGOnlyGNN(nn.Module):
             rnn_dropout=eeg_config.get("rnn_dropout", 0.2),
             bidirectional=eeg_config.get("bidirectional", True),
             pooling_method=eeg_config.get("pooling_method", "mean"),
+            channels=eeg_config.get("channels", None),
+            use_hierarchical_pooling=eeg_config.get("use_hierarchical_pooling", False),
+            num_regions=num_eeg_regions,
+            return_regional_features=use_regional_fusion,
         )
 
         eeg_output_dim = self.eeg_encoder.output_dim
+        if use_regional_fusion:
+            classifier_input_dim = num_eeg_regions * eeg_output_dim
+        else:
+            classifier_input_dim = eeg_output_dim
+
+        self.num_regions = num_eeg_regions
+        self.feature_dim = classifier_input_dim
 
         self.classifier = MLPClassifier(
-            input_dim=eeg_output_dim,
+            input_dim=classifier_input_dim,
             hidden_dims=classifier_config.get("hidden_dims", [256, 128]),
             num_classes=num_classes,
             dropout=classifier_config.get("dropout", 0.3),
             activation=classifier_config.get("activation", "elu"),
         )
-
-        self.num_classes = num_classes
 
     def forward(
         self,
@@ -73,10 +92,19 @@ class HMSEEGOnlyGNN(nn.Module):
     ) -> torch.Tensor | tuple[torch.Tensor, dict]:
         """Forward pass through the EEG-only model."""
         eeg_features = self.eeg_encoder(eeg_graphs, return_sequence=False)
+
+        if self.use_regional_fusion:
+            regional_features = eeg_features
+            eeg_features = regional_features.reshape(regional_features.size(0), -1)
+        else:
+            regional_features = None
+
         logits = self.classifier(eeg_features)
 
         if return_intermediate:
             intermediate = {"eeg_graphs": eeg_graphs}
+            if regional_features is not None:
+                intermediate["regional_eeg_features"] = regional_features
             return logits, intermediate
 
         return logits
@@ -88,6 +116,9 @@ class HMSEEGOnlyGNN(nn.Module):
 
         return {
             "eeg_output_dim": self.eeg_encoder.output_dim,
+            "feature_dim": self.feature_dim,
+            "num_eeg_regions": self.num_regions,
+            "use_regional_fusion": self.use_regional_fusion,
             "num_classes": self.num_classes,
             "total_params": total_params,
             "trainable_params": trainable_params,

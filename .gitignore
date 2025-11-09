@@ -3,7 +3,7 @@ data/
 .pytest_cache
 .vscode
 logs/
-__pycache__/
+__pycache__
 !src/data
 
 checkpoints/

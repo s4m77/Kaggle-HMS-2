@@ -78,8 +78,8 @@ spectrogram:
   # Spectrogram preprocessing (applied before feature extraction)
   preprocessing:
     enabled: true
-    clip_min: 1.0e-7 # Minimum value for clipping
-    clip_max: 1.0e-4 # Maximum value for clipping
+    clip_min: 1.0e-2 # Minimum value for clipping (floor for log stability)
+    clip_max: 1.0e+6 # Maximum value for clipping (ceiling for outliers)
     apply_log: true # Take logarithm after clipping
     normalize: true # Normalize to mean=0, std=1
 
@@ -95,12 +95,12 @@ spectrogram:
     - RP # Right Parasagittal
 
   # Frequency bands for aggregation
+  # Note: Spectrogram data only goes to ~20 Hz, adjusted bands accordingly
   bands:
     delta: [0.5, 4.0]
     theta: [4.0, 8.0]
     alpha: [8.0, 13.0]
-    beta: [13.0, 20.0]
-    gamma: [20.0, 30.0]
+    beta: [13.0, 20.0]  # Adjusted upper bound to match data (was 30.0)
 
   # Aggregation method for frequency bins
   aggregation: "mean" # or 'max'

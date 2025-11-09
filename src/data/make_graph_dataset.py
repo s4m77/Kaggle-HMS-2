@@ -98,19 +98,33 @@ def process_single_label(
         # Build Spectrogram graphs (119 temporal windows)
         spec_graphs = spec_builder.process_spectrogram(spec_window_df)
         
-        # === Get target label ===
+        # === Get target label and vote distribution ===
         label_str = row.expert_consensus.strip()
-        target = label_to_index.get(label_str, -1)
+        consensus_label = label_to_index.get(label_str, -1)
         
-        if target == -1:
+        if consensus_label == -1:
             print(f"Warning: Unknown label '{label_str}' for label_id {row.label_id}")
             return None
+        
+        # Extract vote distribution (6 classes: seizure, lpd, gpd, lrda, grda, other)
+        vote_counts = torch.tensor([
+            row.seizure_vote,
+            row.lpd_vote,
+            row.gpd_vote,
+            row.lrda_vote,
+            row.grda_vote,
+            row.other_vote
+        ], dtype=torch.float32)
+        
+        # Normalize to get probability distribution
+        target = vote_counts / vote_counts.sum()
         
         # === Return processed data ===
         return {
             'eeg_graphs': eeg_graphs,
             'spec_graphs': spec_graphs,
-            'target': target,
+            'target': target,  # Shape: (6,) float tensor with vote probabilities
+            'consensus_label': consensus_label,  # Integer 0-5 for reference/metrics
             'label_id': row.label_id,
             'patient_id': row.patient_id
         }
