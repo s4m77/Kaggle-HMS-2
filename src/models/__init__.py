@@ -14,7 +14,6 @@ from src.models.regularization import (
     edge_weight_regularization,
     compute_graph_regularization,
 )
-from src.models.zorro_explainer import ZORROExplainer, ZORROExplanation
 
 __all__ = [
     "GATEncoder",
@@ -29,6 +28,4 @@ __all__ = [
     "graph_laplacian_regularization",
     "edge_weight_regularization",
     "compute_graph_regularization",
-    "ZORROExplainer",
-    "ZORROExplanation",
 ]

@@ -7,7 +7,7 @@ from torch_geometric.explain import Explainer, GNNExplainer
 from src.lightning_trainer.graph_lightning_module import HMSLightningModule
 from src.models.hms_model import HMSMultiModalGNN
 from src.models.explainer_wrappers import ExplanationWrapper
-from src.lightning_trainer.graph_lightning_module import HMSLightningModule
+from typing import List, Optional
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run GNNExplainer on the HMSMultiModalGNN model.")
@@ -104,7 +104,6 @@ def run_explanation(
     print(f"Loading data sample from {data_path}...")
     try:
         data_dict = torch.load(data_path, map_location='cpu')
-        print(data_dict)
         sample_id = list(data_dict.keys())[0]
         sample_data = data_dict[sample_id]
         
